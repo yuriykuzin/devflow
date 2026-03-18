@@ -228,6 +228,7 @@ codex exec resume "$SESSION_ID" --full-auto \
 Save the implementation review report:
 
 ```bash
+mkdir -p "<output_dir>"
 cat > "<output_dir>/YYYY-MM-DD-<feature>-impl-review.md" << 'EOF'
 # Implementation Review Report
 

@@ -188,7 +188,7 @@ This gives the implementer full context of the plan AND all review feedback.
 Save the review report alongside the plan:
 
 ```bash
-# Save review report
+mkdir -p "<output_dir>"
 cat > "<output_dir>/YYYY-MM-DD-<feature>-plan-review.md" << 'EOF'
 # Plan Review Report
 

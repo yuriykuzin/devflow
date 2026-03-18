@@ -7,8 +7,5 @@
     "name": "Yuriy Kuzin"
   },
   "license": "MIT",
-  "keywords": ["workflow", "orchestration", "cross-tool", "planning", "review"],
-  "skills": "./skills/",
-  "agents": "./agents/",
-  "commands": "./commands/"
+  "keywords": ["workflow", "orchestration", "cross-tool", "planning", "review"]
 }

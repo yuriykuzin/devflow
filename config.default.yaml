@@ -33,3 +33,12 @@ output_dir: "docs/devflow/reports"
 
 # Maximum review iterations before escalating to user
 max_review_iterations: 5
+
+# Tool integrations — comment out to skip during install/uninstall.
+# If this section is absent, all detected tools are installed.
+integrations:
+  codex: true
+  claude-code: true
+  windsurf: true
+  # cursor: true       # auto-detected from repo — no install step needed
+  # gemini: true       # auto-detected from repo — no install step needed

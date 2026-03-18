@@ -191,6 +191,12 @@ Generate a comprehensive report summarizing the entire pipeline:
 - Commit when satisfied
 ```
 
+Create the output directory and save:
+
+```bash
+mkdir -p <output_dir>
+```
+
 Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 
 ## Partial Execution Examples

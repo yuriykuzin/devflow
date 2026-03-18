@@ -1,46 +1,34 @@
 ---
-name: devflow-review
-description: "Cross-tool review of existing code or changes. Use when the user wants a second AI tool to review their work without planning or implementing."
+description: Cross-tool review of existing code or changes. Sends your work to an external AI tool for a second opinion without planning or implementing.
 ---
 
 # Devflow: Review
 
-Send existing code changes to an external AI tool for review. Standalone skill — does not require prior planning or implementation through devflow.
+Cross-tool review workflow. Uses superpowers for internal review, calls an external AI tool (Codex CLI by default) for independent review, then synthesizes both.
 
-## When to Use
+## Prerequisites
+- External reviewer CLI installed (`codex` or `claude`)
+- Config: `~/.devflow/config.yaml` or `.devflow.yaml` (optional)
+- Superpowers skills available (requesting-code-review) — optional but recommended
 
-- User says "review my changes" or "devflow:review"
-- User wants a fresh perspective from a different AI tool
-- As Phase 3 of `devflow:run`
-- After manual implementation that needs cross-tool validation
+---
 
-## Inputs
+## Phase 1 — Read Config
 
-- **What to review**: git diff, specific files, a PR, or staged changes (from user)
-- **Review focus** (optional): security, performance, patterns, tests, etc.
-- **Config**: `~/.devflow/config.yaml` or `.devflow.yaml`
-
-## Step-by-Step
-
-### Step 1: Read Config
-
-Read reviewer config from `~/.devflow/config.yaml` or `.devflow.yaml`. Default: `codex exec --full-auto`.
-
+// turbo
 ```bash
-cat ~/.devflow/config.yaml 2>/dev/null || echo "No global config"
-cat .devflow.yaml 2>/dev/null || echo "No project config"
+echo "=== Global config ===" && cat ~/.devflow/config.yaml 2>/dev/null || echo "(none)"
+echo "=== Project config ===" && cat .devflow.yaml 2>/dev/null || echo "(none)"
 ```
 
-Extract these values (defaults shown):
-- `reviewer.command`: `codex exec`
-- `reviewer.flags`: `--full-auto`
-- `reviewer.model`: `gpt-5.4`
-- `reviewer.effort`: `xhigh`
-- `implementer.model`: `gpt-5.4`
-- `implementer.effort`: `high`
+Extract from config (defaults shown):
+- `reviewer.command`: `codex exec` | `reviewer.flags`: `--full-auto`
+- `reviewer.model`: `gpt-5.4` | `reviewer.effort`: `xhigh`
 - `session_reuse`: `true`
 
-### Step 2: Determine Scope
+---
+
+## Phase 2 — Determine Scope
 
 Ask the user what to review (or infer from context):
 
@@ -53,26 +41,27 @@ Ask the user what to review (or infer from context):
 | "review file X" | `cat X` |
 | "review last commit" | `git show HEAD` |
 
-Collect the content:
+// turbo
 ```bash
 # Example: uncommitted changes
-REVIEW_CONTENT=$(git diff HEAD)
-REVIEW_STATS=$(git diff HEAD --stat)
-
-# Example: PR
-REVIEW_CONTENT=$(gh pr diff <number>)
+echo "=== Diff stats ===" && git diff HEAD --stat
+echo "=== Full diff ===" && git diff HEAD | head -c 50000
 ```
 
-### Step 3: Internal Review First (superpowers)
+---
+
+## Phase 3 — Internal Review (superpowers)
 
 Before calling the external tool, do a quick internal review:
 
-1. **Invoke `superpowers:requesting-code-review`** (if not already done)
+1. Invoke **superpowers requesting-code-review** (if available)
 2. Note any issues found internally
 
-This gives you context for evaluating the external review later.
+This gives context for evaluating the external review later.
 
-### Step 4: External Cross-Tool Review
+---
+
+## Phase 4 — External Cross-Tool Review
 
 **First iteration — new session with model flags:**
 
@@ -96,12 +85,9 @@ REVIEW CHECKLIST:
 5. TESTING — Test coverage, edge cases, test quality
 6. READABILITY — Naming, structure, comments where needed
 
-For each issue found, provide:
-- Severity: critical / important / minor / nitpick
-- File and approximate location
-- What's wrong and how to fix it
+For each issue: severity (critical/important/minor/nitpick), file:line, what's wrong, how to fix.
 
-End with: APPROVED (no blockers) or CHANGES_REQUESTED (has critical/important issues)
+End with: APPROVED (no blockers) or CHANGES_REQUESTED (has critical/important issues).
 
 Changes to review:
 $REVIEW_CONTENT" 2>/dev/null | tee "$EVENTS_FILE"
@@ -119,18 +105,28 @@ SESSION_ID=$(cat "$SESSION_FILE")
 $REVIEW_CONTENT"
 ```
 
-### Step 5: Synthesize Reviews
+---
+
+## Phase 5 — Synthesize Reviews
 
 Combine internal (superpowers) and external review findings:
 
-1. **Deduplicate** — same issue found by both → higher confidence
-2. **Cross-reference** — issue found by one but not other → verify manually
-3. **Filter false positives** — if you're confident an issue is wrong, explain why
+1. **Deduplicate** — same issue found by both = higher confidence
+2. **Cross-reference** — issue found by one but not the other = verify manually
+3. **Filter false positives** — external tool lacks full project context
 4. **Categorize** — group by file, then by severity
 
-### Step 6: Report
+---
+
+## Phase 6 — Report
 
 Present findings to user and save report:
+
+```bash
+mkdir -p <output_dir>
+```
+
+Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`:
 
 ```markdown
 # Cross-Tool Review Report
@@ -140,10 +136,7 @@ Present findings to user and save report:
 **External reviewer**: <tool name>
 
 ## Summary
-- Critical: N
-- Important: N
-- Minor: N
-- Nitpick: N
+- Critical: N | Important: N | Minor: N | Nitpick: N
 
 ## Issues
 
@@ -163,22 +156,16 @@ Issues flagged by external reviewer that appear incorrect, with explanation.
 APPROVED / CHANGES_REQUESTED
 ```
 
-Create the output directory and save:
-
-```bash
-mkdir -p <output_dir>
-```
-
-Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`.
+---
 
 ## Iteration (if CHANGES_REQUESTED)
 
 If user asks to fix and re-review:
 1. Fix the critical/important issues
-2. Re-run Step 4 with the updated diff (resume existing session)
+2. Re-run Phase 4 with updated diff (resume existing session)
 3. Repeat until APPROVED or max iterations
 
-**Implementation handoff**: If fixes are complex, resume the review session with implementer effort:
+**Implementation handoff** — if fixes are complex, resume with implementer effort:
 ```bash
 SESSION_ID=$(cat /tmp/devflow-review.session)
 codex exec resume "$SESSION_ID" --full-auto \
@@ -187,9 +174,10 @@ codex exec resume "$SESSION_ID" --full-auto \
   "Fix the issues you found in your review."
 ```
 
-## Key Rules
+---
 
-- **Internal review FIRST** — gives you context to evaluate external feedback
-- **Never blindly accept external review** — cross-reference with your own analysis
-- **False positives are normal** — external tool lacks full project context, explain disagreements
-- **Report both perspectives** — user gets the full picture, decides what to act on
+## Partial execution examples
+
+- *"Run `/devflow-review` on my staged changes"* → all phases
+- *"Run `/devflow-review`, focus on security"* → all phases with security focus
+- *"Run `/devflow-review` on PR #42"* → review PR diff
