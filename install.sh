@@ -2,19 +2,61 @@
 set -euo pipefail
 
 # Devflow installer — cross-tool AI workflow orchestration.
-# Follows the superpowers pattern: clone → symlink → done.
 #
 # Usage:
-#   ./install.sh              Install for all detected platforms
+#   ./install.sh              Install (symlinks point to this directory)
+#   ./install.sh --deploy     Copy files to ~/.codex/devflow/ then install from there
 #   ./install.sh --uninstall  Remove all devflow integrations
 #   ./install.sh --status     Show current installation status
 #   ./install.sh --help       Show this help
+#
+# Development workflow:
+#   1. Edit skills/workflows in your source repo
+#   2. Run ./install.sh --deploy to sync to ~/.codex/devflow/ and re-link
+#   3. All agents pick up changes immediately
 
-DEVFLOW_HOME="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_DIR="$HOME/.codex/devflow"
+DEVFLOW_HOME="$SCRIPT_DIR"
 
 usage() {
   sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# //'
+  echo ""
+  echo "Development workflow:"
+  echo "  Edit in source repo → ./install.sh --deploy → all agents updated"
   exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Deploy: copy source → ~/.codex/devflow/, then install from there
+# ---------------------------------------------------------------------------
+
+do_deploy() {
+  echo "Devflow — deploying from $SCRIPT_DIR to $INSTALL_DIR"
+  echo ""
+
+  if [ "$SCRIPT_DIR" = "$INSTALL_DIR" ]; then
+    echo "  ⚠ Source and install directories are the same — use ./install.sh without --deploy"
+    exit 1
+  fi
+
+  mkdir -p "$INSTALL_DIR"
+
+  # Sync all files except .git
+  rsync -a --delete \
+    --exclude '.git' \
+    --exclude '.git/' \
+    "$SCRIPT_DIR/" "$INSTALL_DIR/"
+
+  echo "  ✓ Files synced to $INSTALL_DIR"
+
+  # Remove old symlinks so install re-creates them pointing to INSTALL_DIR
+  rm -f "$HOME/.agents/skills/devflow"
+  rm -f "$HOME/.codeium/windsurf/windsurf/workflows"/devflow-*.md 2>/dev/null || true
+
+  # Install from the deployed copy
+  DEVFLOW_HOME="$INSTALL_DIR"
+  do_install
 }
 
 # ---------------------------------------------------------------------------
@@ -142,10 +184,12 @@ do_status() {
   fi
 
   # Claude Code / Cursor
-  if [ -f "$DEVFLOW_HOME/.claude-plugin/plugin.json" ]; then
+  local install_home="$DEVFLOW_HOME"
+  [ -d "$INSTALL_DIR" ] && install_home="$INSTALL_DIR"
+  if [ -f "$install_home/.claude-plugin/plugin.json" ]; then
     echo "  ✓ Claude:    plugin.json present"
   fi
-  if [ -f "$DEVFLOW_HOME/.cursor-plugin/plugin.json" ]; then
+  if [ -f "$install_home/.cursor-plugin/plugin.json" ]; then
     echo "  ✓ Cursor:    plugin.json present"
   fi
 
@@ -162,6 +206,7 @@ do_status() {
 # ---------------------------------------------------------------------------
 
 case "${1:-}" in
+  --deploy)    do_deploy ;;
   --uninstall) do_uninstall ;;
   --status)    do_status ;;
   --help|-h)   usage ;;
