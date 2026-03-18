@@ -1,0 +1,14 @@
+{
+  "name": "devflow",
+  "displayName": "Devflow",
+  "description": "Cross-tool development workflow orchestrator: planning, implementation, and review across Claude Code, Codex, and Windsurf",
+  "version": "0.1.0",
+  "author": {
+    "name": "Yuriy Kuzin"
+  },
+  "license": "MIT",
+  "keywords": ["workflow", "orchestration", "cross-tool", "planning", "review"],
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "commands": "./commands/"
+}
