@@ -1,0 +1,35 @@
+# Devflow default configuration
+# Copy to ~/.devflow/config.yaml and customize as needed.
+# Per-project overrides: place .devflow.yaml in project root.
+
+# External reviewer — called via CLI to review plans and code
+reviewer:
+  tool: codex              # codex | claude | custom
+  command: "codex exec"    # CLI executable + subcommand
+  flags: "--full-auto"     # non-interactive mode flag(s)
+  model: "gpt-5.4"         # model for review
+  effort: "xhigh"          # reasoning effort for reviews (xhigh recommended)
+
+# External implementer — called via CLI to implement plans
+implementer:
+  tool: codex
+  command: "codex exec"
+  flags: "--full-auto"
+  model: "gpt-5.4"         # model for implementation
+  effort: "high"           # reasoning effort for implementation
+
+# Session reuse — keep Codex context across review iterations
+# When true, devflow captures the session ID from the first call and resumes
+# subsequent iterations in the same session. Saves ~20k tokens per iteration.
+session_reuse: true
+
+# Default autonomy mode
+# attended    — ask user on ambiguity (default)
+# unattended  — never ask, make best-effort decisions
+autonomy: attended
+
+# Where to save reports and artifacts
+output_dir: "docs/devflow/reports"
+
+# Maximum review iterations before escalating to user
+max_review_iterations: 5
