@@ -49,7 +49,14 @@ mkdir -p ~/.agents/skills
 ln -s /path/to/devflow/skills ~/.agents/skills/devflow
 ```
 
-**Claude Code / Cursor** — no setup needed. They read plugin manifests from the repo directly.
+**Claude Code** — registered automatically by `install.sh` (symlink into plugin cache + JSON registration). Or manually:
+```bash
+mkdir -p ~/.claude/plugins/cache/local/devflow
+ln -s /path/to/devflow ~/.claude/plugins/cache/local/devflow/0.1.0
+# Then add "devflow@local" to ~/.claude/plugins/installed_plugins.json and settings.json
+```
+
+**Cursor** — reads plugin manifest from the repo directly (no setup needed).
 
 **Windsurf** — symlink workflow files:
 ```bash
@@ -192,6 +199,7 @@ devflow/
 ├── .codex/INSTALL.md               # Agent-readable install instructions
 ├── skills/                         # Skill definitions (shared by all agents)
 │   ├── using-devflow/SKILL.md      # Entry point — skill discovery
+│   ├── using-devflow/references/   # Platform-specific tool mappings
 │   ├── devflow-plan/SKILL.md       # Plan with cross-tool review
 │   ├── devflow-implement/SKILL.md  # Implement with cross-tool review
 │   ├── devflow-review/SKILL.md     # Standalone cross-tool review
@@ -199,15 +207,17 @@ devflow/
 └── windsurf/                       # Windsurf workflow adapters
     ├── devflow-plan.md
     ├── devflow-implement.md
+    ├── devflow-review.md
     └── devflow-run.md
 ```
 
 After installation:
 ```
-/path/to/devflow/              # Git repo = single source of truth
-~/.devflow/config.yaml         # Global configuration
-~/.agents/skills/devflow       # Codex: one symlink → /path/to/devflow/skills/
-~/.codeium/.../devflow-*.md    # Windsurf: symlinks → repo
+/path/to/devflow/                              # Git repo = single source of truth
+~/.devflow/config.yaml                         # Global configuration
+~/.agents/skills/devflow                       # Codex: symlink → skills/
+~/.codeium/.../devflow-*.md                    # Windsurf: symlinks → windsurf/
+~/.claude/plugins/cache/local/devflow/0.1.0    # Claude Code: symlink → repo
 ```
 
 ## License
