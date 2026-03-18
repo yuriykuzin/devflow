@@ -39,7 +39,7 @@ git clone https://github.com/yuriykuzin/devflow.git ~/.codex/devflow
 
 You can clone to **any directory** — the install script creates symlinks pointing to wherever it lives. `~/.codex/devflow` is the recommended convention.
 
-Run `install.sh --status` to check, or `install.sh --uninstall` to remove.
+Run `install.sh --status` to check, `install.sh --choose` to select tools, or `install.sh --uninstall` to remove.
 
 ### Manual install (per platform)
 
@@ -49,11 +49,9 @@ mkdir -p ~/.agents/skills
 ln -s /path/to/devflow/skills ~/.agents/skills/devflow
 ```
 
-**Claude Code** — registered automatically by `install.sh` (symlink into plugin cache + JSON registration). Or manually:
+**Claude Code** — registered automatically by `install.sh` (creates local marketplace + copies to plugin cache). Restart Claude Code after install. If skills don't appear, start with:
 ```bash
-mkdir -p ~/.claude/plugins/cache/local/devflow
-ln -s /path/to/devflow ~/.claude/plugins/cache/local/devflow/0.1.0
-# Then add "devflow@local" to ~/.claude/plugins/installed_plugins.json and settings.json
+claude --plugin-dir /path/to/devflow
 ```
 
 **Cursor** — reads plugin manifest from the repo directly (no setup needed).
@@ -217,7 +215,7 @@ After installation:
 ~/.devflow/config.yaml                         # Global configuration
 ~/.agents/skills/devflow                       # Codex: symlink → skills/
 ~/.codeium/.../devflow-*.md                    # Windsurf: symlinks → windsurf/
-~/.claude/plugins/cache/local/devflow/0.1.0    # Claude Code: symlink → repo
+~/.claude/plugins/cache/devflow-local/...       # Claude Code: plugin cache
 ```
 
 ## License
