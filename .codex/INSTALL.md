@@ -26,7 +26,7 @@ mkdir -p ~/.agents/skills
 ln -s ~/.codex/devflow/skills ~/.agents/skills/devflow
 ```
 
-**Claude Code** — no setup needed. Claude Code reads `.claude-plugin/plugin.json` from the repo.
+**Claude Code** — run `install.sh` (registers a local marketplace and copies plugin to cache). Restart Claude Code after install. Fallback: `claude --plugin-dir /path/to/devflow`.
 
 **Cursor** — no setup needed. Cursor reads `.cursor-plugin/plugin.json` from the repo.
 
@@ -65,7 +65,8 @@ ls ~/.devflow/config.yaml             # Config exists
 cd ~/.codex/devflow && git pull
 ```
 
-All consumers use symlinks — changes propagate instantly. No re-install needed.
+Codex, Windsurf, Cursor, and Gemini use symlinks/direct reads — changes propagate instantly.
+Claude Code uses a cached copy — re-run `install.sh` after `git pull` to update the cache.
 
 ## Uninstalling
 

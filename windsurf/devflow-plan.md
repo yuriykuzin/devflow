@@ -102,6 +102,10 @@ Resuming saves ~20k tokens per iteration (Codex keeps full context).
 
 ## Phase 5 — Finalize
 
+```bash
+mkdir -p docs/devflow/reports
+```
+
 Save review report to `docs/devflow/reports/YYYY-MM-DD-<feature>-plan-review.md`.
 
 Session file `/tmp/devflow-plan-review.session` is preserved for `/devflow-implement` to resume.

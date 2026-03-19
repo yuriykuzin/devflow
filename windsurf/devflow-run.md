@@ -107,6 +107,10 @@ Generate and save comprehensive report:
 - Commit when satisfied
 ```
 
+```bash
+mkdir -p docs/devflow/reports
+```
+
 Save to `docs/devflow/reports/YYYY-MM-DD-<feature>-report.md`.
 
 ---
