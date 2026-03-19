@@ -62,15 +62,18 @@ git diff <start-commit>..HEAD | head -c 50000
 
 **If plan-review session exists** (from `/devflow-plan`), resume it — reviewer already knows the plan:
 
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
 ```bash
 SESSION_FILE="/tmp/devflow-impl-review.session"
 OUTPUT_FILE="/tmp/devflow-impl-review-output.txt"
 PLAN_SESSION_FILE="/tmp/devflow-plan-review.session"
-MODEL_FLAGS='-m <reviewer.model> -c '\''model_reasoning_effort="<reviewer.effort>"'\'''
 
 if [ -f "$PLAN_SESSION_FILE" ]; then
   SESSION_ID=$(cat "$PLAN_SESSION_FILE")
-  codex exec resume "$SESSION_ID" --full-auto $MODEL_FLAGS \
+  codex exec resume "$SESSION_ID" --full-auto \
+    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
     -o "$OUTPUT_FILE" \
     "The plan you reviewed is now implemented. Review the code changes. READ-ONLY.
 
@@ -88,7 +91,8 @@ $(git diff HEAD | head -c 50000)"
   cp "$PLAN_SESSION_FILE" "$SESSION_FILE"
 else
   # Fresh session (no prior plan-review context)
-  codex exec --full-auto --json $MODEL_FLAGS \
+  codex exec --full-auto --json \
+    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
     -o "$OUTPUT_FILE" \
     "You are reviewing code implementation against its plan. READ-ONLY.
 

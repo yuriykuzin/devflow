@@ -8,7 +8,7 @@ reviewer:
   command: "codex exec"    # CLI executable + subcommand
   flags: "--full-auto"     # non-interactive mode flag(s)
   model: "gpt-5.4"         # model for review
-  effort: "xhigh"          # reasoning effort for reviews (xhigh recommended)
+  effort: "xhigh"          # reasoning effort (passed via -c 'model_reasoning_effort=...', NOT --effort)
 
 # External implementer — called via CLI to implement plans
 implementer:
@@ -16,7 +16,7 @@ implementer:
   command: "codex exec"
   flags: "--full-auto"
   model: "gpt-5.4"         # model for implementation
-  effort: "high"           # reasoning effort for implementation
+  effort: "high"           # reasoning effort (passed via -c 'model_reasoning_effort=...', NOT --effort)
 
 # Session reuse — keep Codex context across review iterations
 # When true, devflow captures the session ID from the first call and resumes

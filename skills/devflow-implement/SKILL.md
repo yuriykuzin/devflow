@@ -137,6 +137,9 @@ Send the implementation to an external AI tool for review.
 
 **First iteration — start new session (or resume plan-review session):**
 
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
 ```bash
 DIFF=$(cat /tmp/devflow-impl-diff.patch)
 PLAN=$(cat "<plan-file-path>")
@@ -145,13 +148,12 @@ OUTPUT_FILE="/tmp/devflow-impl-review-output.txt"
 EVENTS_FILE="/tmp/devflow-impl-review-events.jsonl"
 PLAN_SESSION_FILE="/tmp/devflow-plan-review.session"
 
-MODEL_FLAGS='-m <reviewer.model> -c '\''model_reasoning_effort="<reviewer.effort>"'\'''
-
 # Option A: Resume plan-review session (reviewer already knows the plan)
 if [ -f "$PLAN_SESSION_FILE" ]; then
   SESSION_ID=$(cat "$PLAN_SESSION_FILE")
   <REVIEWER_COMMAND> resume "$SESSION_ID" <REVIEWER_FLAGS> \
-    $MODEL_FLAGS -o "$OUTPUT_FILE" \
+    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+    -o "$OUTPUT_FILE" \
     "The plan you reviewed is now implemented. Review the code changes.
 
 REVIEW CHECKLIST:
@@ -170,7 +172,8 @@ $DIFF"
 
 # Option B: Fresh session (no prior plan-review context)
 else
-  <REVIEWER_COMMAND> <REVIEWER_FLAGS> --json $MODEL_FLAGS \
+  <REVIEWER_COMMAND> <REVIEWER_FLAGS> --json \
+    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
     -o "$OUTPUT_FILE" \
     "You are reviewing a code implementation against its plan. READ-ONLY review.
 

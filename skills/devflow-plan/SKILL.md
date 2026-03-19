@@ -91,17 +91,18 @@ Now send the plan to an external AI tool for a fresh-perspective review.
 
 **First iteration — start new session and capture session ID:**
 
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
 ```bash
 PLAN_FILE="<path-to-plan-file>"
 SESSION_FILE="/tmp/devflow-plan-review.session"
 OUTPUT_FILE="/tmp/devflow-plan-review-output.txt"
 EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
 
-# Build model flags from config
-MODEL_FLAGS='-m <reviewer.model> -c '\''model_reasoning_effort="<reviewer.effort>"'\'''
-
 # First call: use --json to capture session ID
-<REVIEWER_COMMAND> <REVIEWER_FLAGS> --json $MODEL_FLAGS \
+<REVIEWER_COMMAND> <REVIEWER_FLAGS> --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
   -o "$OUTPUT_FILE" \
   "You are reviewing an implementation plan. You must NOT create or modify any files. READ-ONLY review.
 
