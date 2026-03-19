@@ -253,9 +253,13 @@ do_install() {
   # 1. Codex CLI
   echo "Codex CLI:"
   if integration_enabled "codex"; then
-    mkdir -p "$HOME/.agents/skills"
-    symlink_or_skip "$DEVFLOW_HOME/skills" "$HOME/.agents/skills/devflow" \
-      "~/.agents/skills/devflow → skills/"
+    if command -v codex >/dev/null 2>&1 || [ -d "$HOME/.agents" ]; then
+      mkdir -p "$HOME/.agents/skills"
+      symlink_or_skip "$DEVFLOW_HOME/skills" "$HOME/.agents/skills/devflow" \
+        "~/.agents/skills/devflow → skills/"
+    else
+      echo "  · not detected — skipped"
+    fi
   else
     echo "  · skipped (disabled in config)"
   fi
