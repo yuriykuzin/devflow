@@ -213,7 +213,7 @@ Same iteration logic as `devflow:plan` Step 4:
 - **ISSUES found**:
   - Fix critical and important issues
   - Re-run external review
-  - Max 5 iterations, then escalate to user
+  - Max 7 iterations (from config `max_review_iterations`), then escalate to user — present all remaining issues and ask what actions to take
 
 When fixing issues, use the current tool's capabilities (edit files, run tests). Do NOT call the external tool for fixes — only for review.
 

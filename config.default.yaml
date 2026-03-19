@@ -32,7 +32,7 @@ autonomy: attended
 output_dir: "docs/devflow/reports"
 
 # Maximum review iterations before escalating to user
-max_review_iterations: 5
+max_review_iterations: 7
 
 # Tool integrations — comment out to skip during install/uninstall.
 # If this section is absent, all detected tools are installed.

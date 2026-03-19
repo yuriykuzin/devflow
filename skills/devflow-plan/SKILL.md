@@ -166,7 +166,7 @@ Parse the external reviewer's response:
   - For each **important** issue: fix it or explain why it's a false positive
   - For each **minor** issue: note it, fix if easy
   - After fixes, go back to Step 3 (re-review)
-  - **Max iterations**: 5 (from config `max_review_iterations`). If reached, present remaining issues to user for decision.
+  - **Max iterations**: 7 (from config `max_review_iterations`). If reached without approval, escalate to the user — present all remaining issues and ask what actions to take.
 
 ### Step 5: Implementation Handoff (optional)
 

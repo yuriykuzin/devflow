@@ -179,7 +179,7 @@ Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`.
 If user asks to fix and re-review:
 1. Fix the critical/important issues
 2. Re-run Step 4 with the updated diff (resume existing session)
-3. Repeat until APPROVED or max iterations
+3. Repeat until APPROVED or max 7 iterations (from config `max_review_iterations`). If not approved after 7 rounds, escalate to the user — present all remaining issues and ask what actions to take
 
 **Implementation handoff**: If fixes are complex, resume the review session with implementer effort:
 ```bash
