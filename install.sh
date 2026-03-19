@@ -321,6 +321,7 @@ MKEOF
 
       # Register marketplace in known_marketplaces.json
       local mkt_file="$HOME/.claude/plugins/known_marketplaces.json"
+      [ -f "$mkt_file" ] || echo '{}' > "$mkt_file"
       if [ -f "$mkt_file" ]; then
         json_set "$mkt_file" "
 if '$CLAUDE_MKT' not in data:
@@ -345,6 +346,7 @@ else:
 
       # Register in installed_plugins.json
       local installed_file="$HOME/.claude/plugins/installed_plugins.json"
+      [ -f "$installed_file" ] || echo '{"version": 2, "plugins": {}}' > "$installed_file"
       if [ -f "$installed_file" ]; then
         local ts
         ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
@@ -366,6 +368,7 @@ else:
 
       # Enable in settings.json
       local settings_file="$HOME/.claude/settings.json"
+      [ -f "$settings_file" ] || echo '{}' > "$settings_file"
       if [ -f "$settings_file" ]; then
         json_set "$settings_file" "
 key = '$plugin_key'

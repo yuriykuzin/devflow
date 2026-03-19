@@ -78,7 +78,8 @@ cp /path/to/devflow/config.default.yaml ~/.devflow/config.yaml
 cd /path/to/devflow && git pull
 ```
 
-All consumers use symlinks — changes propagate instantly. No re-install needed.
+Codex, Windsurf, Cursor, and Gemini use symlinks or direct reads — changes propagate instantly.
+Claude Code uses a cached copy — re-run `install.sh` after pulling to update the cache.
 
 ## Uninstalling
 

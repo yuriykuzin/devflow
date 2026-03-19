@@ -130,6 +130,10 @@ codex exec resume "$SESSION_ID" --full-auto \
 
 ## Phase 6 — Finalize
 
+```bash
+mkdir -p docs/devflow/reports
+```
+
 Save report to `docs/devflow/reports/YYYY-MM-DD-<feature>-impl-review.md`.
 
 > "Implementation complete and cross-reviewed. Changes in working directory (not committed)."
