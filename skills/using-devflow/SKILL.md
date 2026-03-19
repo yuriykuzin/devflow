@@ -32,46 +32,80 @@ Devflow reads config from two places (project overrides global):
 1. **Global**: `~/.devflow/config.yaml`
 2. **Project**: `.devflow.yaml` in project root
 
-If no config exists, defaults are used (Codex CLI for external calls).
+If no config exists, defaults are used (Claude Code CLI for external calls).
+
+## Backend Switching
+
+Devflow supports multiple CLI backends. Switch with one line in config:
+
+```yaml
+backend: claude    # or: codex
+```
+
+Each backend has its own section with reviewer/implementer settings.
+See `config.default.yaml` for the full template.
 
 ## How Cross-Tool Calls Work
 
-Devflow calls external tools via their CLI in non-interactive mode:
+Devflow calls external tools via their CLI in non-interactive mode.
+The exact syntax depends on the active `backend`:
+
+### Backend: claude (Claude Code CLI)
 
 ```bash
-# Codex (default) — first call captures session ID via --json
+# First call — captures session ID from JSON output
+claude -p --output-format json --permission-mode plan \
+  --model opus --effort max \
+  "Review this plan: ..."
+
+# Resume session for subsequent iterations
+claude -p --output-format json --permission-mode plan \
+  --model opus --effort max \
+  --resume "$SESSION_ID" \
+  "Re-review: ..."
+
+# Parse result and session ID
+jq -r '.result' /tmp/review-output.txt
+jq -r '.session_id' /tmp/review-output.txt
+```
+
+### Backend: codex (Codex CLI)
+
+```bash
+# First call — captures session ID via --json JSONL events
 codex exec --full-auto --json -m gpt-5.4 -c 'model_reasoning_effort="xhigh"' \
   -o /tmp/review-output.txt "Review this plan: ..." 2>/dev/null | tee /tmp/events.jsonl
 
-# Codex — resume session for subsequent iterations (saves ~20k tokens)
+# Resume session
 codex exec resume "$SESSION_ID" --full-auto -o /tmp/review-output.txt "Re-review: ..."
-
-# Claude Code
-claude -p "Review this plan: ..."
 ```
 
 The orchestrating agent (you) runs Bash to invoke the external tool, captures its output, and uses it to iterate.
 
 ## Model Tiers
 
-Devflow uses different model tiers for different tasks:
+Devflow uses different model tiers for different tasks. Defaults depend on backend:
 
-| Role | Model | Effort | Purpose |
-|------|-------|--------|----------|
-| **Reviewer** | gpt-5.4 | xhigh | Thorough plan and code reviews |
-| **Implementer** | gpt-5.4 | high | Fast, capable code generation |
-| **Orchestrator** | (your model) | (your effort) | You — the host agent (e.g., opus-4.6) |
+| Role | claude backend | codex backend | Purpose |
+|------|---------------|---------------|----------|
+| **Reviewer** | opus / max | gpt-5.4 / xhigh | Thorough plan and code reviews |
+| **Implementer** | sonnet / high | gpt-5.4 / high | Fast, capable code generation |
+| **Orchestrator** | (your model) | (your model) | You — the host agent |
 
-Configured in `~/.devflow/config.yaml` under `reviewer.model`/`reviewer.effort` and `implementer.model`/`implementer.effort`.
+Configured in `~/.devflow/config.yaml` under `<backend>.reviewer.*` and `<backend>.implementer.*`.
 
 ## Session Reuse
 
-When `session_reuse: true` (default), devflow:
-1. Captures the Codex session ID on the first external call (`--json` → `thread_id`)
-2. Resumes the same session for subsequent iterations (`codex exec resume <id>`)
+When `<backend>.session_reuse: true` (default), devflow:
+1. Captures the session ID on the first external call
+   - **claude**: `jq -r '.session_id'` from `--output-format json`
+   - **codex**: `thread_id` from `--json` JSONL first event
+2. Resumes the same session for subsequent iterations
+   - **claude**: `--resume <session_id>`
+   - **codex**: `codex exec resume <session_id>`
 3. Passes sessions between phases (plan review → implementation review)
 
-This saves ~20k tokens per resumed call (Codex doesn't re-read skills/AGENTS.md).
+This saves ~20k tokens per resumed call.
 
 ## Relationship with Superpowers
 

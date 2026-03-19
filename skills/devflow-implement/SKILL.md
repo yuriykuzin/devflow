@@ -61,16 +61,15 @@ digraph implement {
 
 ### Step 1: Read Config
 
-Same as `devflow:plan` Step 1. Read reviewer config from `~/.devflow/config.yaml` or `.devflow.yaml`.
+Same as `devflow:plan` Step 1. Read config from `~/.devflow/config.yaml` or `.devflow.yaml`.
 
-Extract these values (defaults shown):
-- `reviewer.command`: `codex exec`
-- `reviewer.flags`: `--full-auto`
-- `reviewer.model`: `gpt-5.4`
-- `reviewer.effort`: `xhigh`
-- `implementer.model`: `gpt-5.4`
-- `implementer.effort`: `high`
-- `session_reuse`: `true`
+**Resolve the active backend** from the `backend` key (default: `claude`), then read
+settings from the matching section:
+
+- `backend`: `claude` or `codex`
+- `<backend>.reviewer.*` (command, flags, model, effort)
+- `<backend>.implementer.*` (command, flags, model, effort)
+- `<backend>.session_reuse`
 
 Also check if a plan-review session exists from a prior `devflow:plan` run:
 ```bash
@@ -135,26 +134,18 @@ git diff <start-commit>..HEAD > /tmp/devflow-impl-diff.patch
 
 Send the implementation to an external AI tool for review.
 
-**First iteration — start new session (or resume plan-review session):**
-
-> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
-> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
-
+Common variables:
 ```bash
 DIFF=$(cat /tmp/devflow-impl-diff.patch)
 PLAN=$(cat "<plan-file-path>")
 SESSION_FILE="/tmp/devflow-impl-review.session"
 OUTPUT_FILE="/tmp/devflow-impl-review-output.txt"
-EVENTS_FILE="/tmp/devflow-impl-review-events.jsonl"
 PLAN_SESSION_FILE="/tmp/devflow-plan-review.session"
+```
 
-# Option A: Resume plan-review session (reviewer already knows the plan)
-if [ -f "$PLAN_SESSION_FILE" ]; then
-  SESSION_ID=$(cat "$PLAN_SESSION_FILE")
-  <REVIEWER_COMMAND> resume "$SESSION_ID" <REVIEWER_FLAGS> \
-    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
-    -o "$OUTPUT_FILE" \
-    "The plan you reviewed is now implemented. Review the code changes.
+The review prompt (same for all backends):
+```
+REVIEW_PROMPT="You are reviewing a code implementation against its plan. READ-ONLY review.
 
 REVIEW CHECKLIST:
 1. PLAN COMPLIANCE — implements everything in the plan?
@@ -165,43 +156,88 @@ REVIEW CHECKLIST:
 
 Respond: APPROVED or ISSUES (severity + file:line + fix).
 
-Code changes (diff):
-$DIFF"
-  # Reuse the same session for subsequent iterations
-  cp "$PLAN_SESSION_FILE" "$SESSION_FILE"
-
-# Option B: Fresh session (no prior plan-review context)
-else
-  <REVIEWER_COMMAND> <REVIEWER_FLAGS> --json \
-    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
-    -o "$OUTPUT_FILE" \
-    "You are reviewing a code implementation against its plan. READ-ONLY review.
-
-REVIEW CHECKLIST:
-1. PLAN COMPLIANCE — implements everything?
-2. CODE QUALITY — clean, no bugs?
-3. TESTING — adequate?
-4. PATTERNS — project conventions?
-5. SECURITY — concerns?
-
-Respond: APPROVED or ISSUES (severity + file:line + fix).
-
 Plan:
 $PLAN
 
-Code changes:
-$DIFF" 2>/dev/null | tee "$EVENTS_FILE"
-  head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
+Code changes (diff):
+$DIFF"
+```
+
+---
+
+#### Backend: claude
+
+**Option A: Resume plan-review session (reviewer already knows the plan):**
+```bash
+if [ -f "$PLAN_SESSION_FILE" ]; then
+  SESSION_ID=$(cat "$PLAN_SESSION_FILE")
+  claude -p --output-format json --permission-mode plan \
+    --model <reviewer.model> --effort <reviewer.effort> \
+    --resume "$SESSION_ID" \
+    "The plan you reviewed is now implemented. Review the code changes.
+
+$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+  jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
 fi
+```
+
+**Option B: Fresh session (no prior plan-review context):**
+```bash
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  "$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
 ```
 
 **Subsequent iterations — resume:**
 ```bash
 SESSION_ID=$(cat "$SESSION_FILE")
-<REVIEWER_COMMAND> resume "$SESSION_ID" <REVIEWER_FLAGS> \
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  --resume "$SESSION_ID" \
+  "Issues fixed. Re-review:\n$(git diff HEAD | head -c 50000)"
+```
+
+---
+
+#### Backend: codex
+
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
+**Option A: Resume plan-review session:**
+```bash
+if [ -f "$PLAN_SESSION_FILE" ]; then
+  SESSION_ID=$(cat "$PLAN_SESSION_FILE")
+  codex exec resume "$SESSION_ID" --full-auto \
+    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+    -o "$OUTPUT_FILE" \
+    "The plan you reviewed is now implemented. Review the code changes.
+
+$REVIEW_PROMPT"
+  cp "$PLAN_SESSION_FILE" "$SESSION_FILE"
+fi
+```
+
+**Option B: Fresh session:**
+```bash
+EVENTS_FILE="/tmp/devflow-impl-review-events.jsonl"
+codex exec --full-auto --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+  -o "$OUTPUT_FILE" \
+  "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
+head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
+```
+
+**Subsequent iterations — resume:**
+```bash
+SESSION_ID=$(cat "$SESSION_FILE")
+codex exec resume "$SESSION_ID" --full-auto \
   -o "$OUTPUT_FILE" \
   "Issues fixed. Re-review:\n$(git diff HEAD | head -c 50000)"
 ```
+
+---
 
 **Note on large diffs**: If the diff exceeds ~50KB, split the review by file groups.
 
@@ -217,7 +253,18 @@ Same iteration logic as `devflow:plan` Step 4:
 
 When fixing issues, use the current tool's capabilities (edit files, run tests). Do NOT call the external tool for fixes — only for review.
 
-**Implementation handoff**: If fixes are complex, you can resume the review session with implementer effort:
+**Implementation handoff**: If fixes are complex, resume the review session with implementer settings:
+
+**claude backend:**
+```bash
+SESSION_ID=$(cat "$SESSION_FILE")
+claude -p --output-format json --permission-mode default \
+  --model <implementer.model> --effort <implementer.effort> \
+  --resume "$SESSION_ID" \
+  "Fix the issues you found in your review. Here are the files: ..."
+```
+
+**codex backend:**
 ```bash
 SESSION_ID=$(cat "$SESSION_FILE")
 codex exec resume "$SESSION_ID" --full-auto \

@@ -4,7 +4,7 @@ description: Implement a plan with cross-tool review loop. Delegates to superpow
 
 # Devflow: Implement
 
-Cross-tool implementation workflow. Uses superpowers for plan execution, calls an external AI tool to review the resulting code.
+Cross-tool implementation workflow. Uses superpowers for plan execution, calls an external AI tool (configured via `backend` key) to review the resulting code.
 
 ## Prerequisites
 - Plan file ready (from `/devflow-plan` or provided by user)
@@ -22,11 +22,11 @@ echo "=== Project config ===" && cat .devflow.yaml 2>/dev/null || echo "(none)"
 echo "=== Plan-review session ===" && cat /tmp/devflow-plan-review.session 2>/dev/null || echo "(none)"
 ```
 
-Extract from config (defaults shown):
-- `reviewer.command`: `codex exec` | `reviewer.flags`: `--full-auto`
-- `reviewer.model`: `gpt-5.4` | `reviewer.effort`: `xhigh`
-- `implementer.model`: `gpt-5.4` | `implementer.effort`: `high`
-- `session_reuse`: `true`
+**Resolve the active backend** from the `backend` key (default: `claude`), then read
+from the matching section (`claude.*` or `codex.*`):
+- `<backend>.reviewer.*` (command, flags, model, effort)
+- `<backend>.implementer.*` (command, flags, model, effort)
+- `<backend>.session_reuse`
 
 Read the plan file provided by the user. Verify it has task structure.
 
@@ -60,22 +60,13 @@ git diff <start-commit>..HEAD | head -c 50000
 
 ## Phase 4 — External Cross-Tool Review
 
-**If plan-review session exists** (from `/devflow-plan`), resume it — reviewer already knows the plan:
-
-> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
-> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
-
+Common variables:
 ```bash
 SESSION_FILE="/tmp/devflow-impl-review.session"
 OUTPUT_FILE="/tmp/devflow-impl-review-output.txt"
 PLAN_SESSION_FILE="/tmp/devflow-plan-review.session"
 
-if [ -f "$PLAN_SESSION_FILE" ]; then
-  SESSION_ID=$(cat "$PLAN_SESSION_FILE")
-  codex exec resume "$SESSION_ID" --full-auto \
-    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
-    -o "$OUTPUT_FILE" \
-    "The plan you reviewed is now implemented. Review the code changes. READ-ONLY.
+REVIEW_PROMPT="Review the code implementation. READ-ONLY.
 
 Review for:
 1. PLAN COMPLIANCE — implements everything?
@@ -88,22 +79,56 @@ Respond: APPROVED or ISSUES (severity + file:line + fix).
 
 Code changes:
 $(git diff HEAD | head -c 50000)"
+```
+
+### Backend: claude
+
+**Resume plan-review session (if exists):**
+```bash
+if [ -f "$PLAN_SESSION_FILE" ]; then
+  SESSION_ID=$(cat "$PLAN_SESSION_FILE")
+  claude -p --output-format json --permission-mode plan \
+    --model <reviewer.model> --effort <reviewer.effort> \
+    --resume "$SESSION_ID" \
+    "The plan you reviewed is now implemented. $REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+  jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
+else
+  claude -p --output-format json --permission-mode plan \
+    --model <reviewer.model> --effort <reviewer.effort> \
+    "$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+  jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
+fi
+```
+
+**Subsequent iterations — resume:**
+```bash
+SESSION_ID=$(cat "$SESSION_FILE")
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  --resume "$SESSION_ID" \
+  "Issues fixed. Re-review:\n$(git diff HEAD | head -c 50000)"
+```
+
+### Backend: codex
+
+> **WARNING**: Codex CLI has NO `--effort` flag. Use `-c 'model_reasoning_effort="..."'`.
+
+**Resume plan-review session (if exists):**
+```bash
+if [ -f "$PLAN_SESSION_FILE" ]; then
+  SESSION_ID=$(cat "$PLAN_SESSION_FILE")
+  codex exec resume "$SESSION_ID" --full-auto \
+    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+    -o "$OUTPUT_FILE" \
+    "The plan you reviewed is now implemented. $REVIEW_PROMPT"
   cp "$PLAN_SESSION_FILE" "$SESSION_FILE"
 else
-  # Fresh session (no prior plan-review context)
+  EVENTS_FILE="/tmp/devflow-impl-review-events.jsonl"
   codex exec --full-auto --json \
     -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
     -o "$OUTPUT_FILE" \
-    "You are reviewing code implementation against its plan. READ-ONLY.
-
-Respond: APPROVED or ISSUES.
-
-Plan:
-$(cat <plan-file>)
-
-Diff:
-$(git diff HEAD | head -c 50000)" 2>/dev/null | tee /tmp/devflow-impl-review-events.jsonl
-  head -1 /tmp/devflow-impl-review-events.jsonl | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
+    "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
+  head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
 fi
 ```
 
@@ -115,7 +140,17 @@ codex exec resume "$SESSION_ID" --full-auto \
   "Issues fixed. Re-review:\n$(git diff HEAD | head -c 50000)"
 ```
 
-**Implementation handoff** — if fixes are complex, resume with implementer effort:
+### Implementation handoff (both backends)
+
+**claude:**
+```bash
+claude -p --output-format json --permission-mode default \
+  --model <implementer.model> --effort <implementer.effort> \
+  --resume "$SESSION_ID" \
+  "Fix the issues you found in your review."
+```
+
+**codex:**
 ```bash
 codex exec resume "$SESSION_ID" --full-auto \
   -m <implementer.model> -c 'model_reasoning_effort="<implementer.effort>"' \

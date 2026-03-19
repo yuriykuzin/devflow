@@ -110,40 +110,78 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 Global config: `~/.devflow/config.yaml`
 Project override: `.devflow.yaml` in project root
 
+### Switching Providers
+
+To switch between Claude Code and Codex as the external reviewer/implementer, change **one line** in `~/.devflow/config.yaml`:
+
 ```yaml
-reviewer:
-  tool: codex            # codex | claude | custom
-  command: "codex exec"  # CLI command + subcommand
-  flags: "--full-auto"   # non-interactive flags
-  model: "gpt-5.4"       # model for reviews
-  effort: "xhigh"        # reasoning effort (xhigh = thorough reviews)
+# Use Claude Code (opus for reviews, sonnet for implementation)
+backend: claude
 
-implementer:
-  tool: codex
-  command: "codex exec"
-  flags: "--full-auto"
-  model: "gpt-5.4"       # model for implementation
-  effort: "high"         # reasoning effort (high = fast implementation)
+# Use Codex CLI (gpt-5.4 for both)
+backend: codex
+```
 
-session_reuse: true      # saves ~20k tokens per resumed call
-autonomy: attended       # attended | unattended
+That's it — all skills and workflows read the `backend` key and use the matching section automatically. No other changes needed.
+
+You can also override per-project by creating `.devflow.yaml` in the project root with just:
+```yaml
+backend: codex   # this project uses Codex regardless of global setting
+```
+
+### Full Config Reference
+
+```yaml
+backend: claude           # codex | claude — change this one line to switch
+
+claude:
+  reviewer:
+    command: "claude"
+    flags: "-p --output-format json --permission-mode plan"
+    model: "opus"          # alias for claude-opus-4-6
+    effort: "max"          # --effort max (thorough reviews)
+  implementer:
+    command: "claude"
+    flags: "-p --output-format json --permission-mode default"
+    model: "sonnet"        # alias for claude-sonnet-4-6
+    effort: "high"         # --effort high (fast implementation)
+  session_reuse: true
+
+codex:
+  reviewer:
+    command: "codex exec"
+    flags: "--full-auto"
+    model: "gpt-5.4"
+    effort: "xhigh"        # via -c 'model_reasoning_effort="..."'
+  implementer:
+    command: "codex exec"
+    flags: "--full-auto"
+    model: "gpt-5.4"
+    effort: "high"
+  session_reuse: true
+
+autonomy: attended         # attended | unattended
 output_dir: "docs/devflow/reports"
 ```
 
 ### Model Tiers
 
-| Role | Default Model | Default Effort | Purpose |
-|------|--------------|----------------|----------|
-| Reviewer | gpt-5.4 | xhigh | Thorough plan and code reviews |
-| Implementer | gpt-5.4 | high | Fast, capable code generation |
-| Orchestrator | (host model) | (host effort) | The agent running devflow (e.g., opus-4.6) |
+| Role | claude backend | codex backend | Purpose |
+|------|---------------|---------------|----------|
+| Reviewer | opus / max | gpt-5.4 / xhigh | Thorough plan and code reviews |
+| Implementer | sonnet / high | gpt-5.4 / high | Fast, capable code generation |
+| Orchestrator | (host model) | (host model) | The agent running devflow (e.g., opus-4.6) |
 
 ### Session Reuse
 
-When `session_reuse: true`, devflow captures the Codex session ID on the first call (`--json` → `thread_id`) and resumes subsequent iterations in the same session (`codex exec resume <id>`). This:
-- Saves ~20k tokens per resumed call (Codex skips re-reading skills/AGENTS.md)
+When `<backend>.session_reuse: true`, devflow captures the session ID on the first call and resumes subsequent iterations in the same session. This:
+- Saves ~20k tokens per resumed call
 - Preserves review context across iterations
 - Enables session handoff between phases (plan review → implementation review)
+
+Session capture differs by backend:
+- **claude**: `jq -r '.session_id'` from `--output-format json`, resume with `--resume <id>`
+- **codex**: `thread_id` from `--json` JSONL, resume with `codex exec resume <id>`
 
 ## Skills
 

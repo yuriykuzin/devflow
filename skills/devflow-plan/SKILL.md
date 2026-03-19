@@ -55,7 +55,7 @@ digraph plan {
 ### Step 1: Read Config
 
 Read devflow configuration. Check in order (later overrides earlier):
-1. Defaults: reviewer tool = `codex exec`, flags = `--full-auto`
+1. Defaults (see `config.default.yaml`)
 2. Global: `~/.devflow/config.yaml`
 3. Project: `.devflow.yaml` in project root
 
@@ -65,14 +65,21 @@ cat ~/.devflow/config.yaml 2>/dev/null || echo "No global config"
 cat .devflow.yaml 2>/dev/null || echo "No project config"
 ```
 
-Extract these values (defaults shown):
-- `reviewer.command`: `codex exec`
-- `reviewer.flags`: `--full-auto`
-- `reviewer.model`: `gpt-5.4`
-- `reviewer.effort`: `xhigh`
-- `implementer.model`: `gpt-5.4`
-- `implementer.effort`: `high`
-- `session_reuse`: `true`
+**Resolve the active backend** from the `backend` key (default: `claude`), then read
+settings from the matching section:
+
+- `backend`: `claude` or `codex`
+- `<backend>.reviewer.command`
+- `<backend>.reviewer.flags`
+- `<backend>.reviewer.model`
+- `<backend>.reviewer.effort`
+- `<backend>.implementer.command`
+- `<backend>.implementer.flags`
+- `<backend>.implementer.model`
+- `<backend>.implementer.effort`
+- `<backend>.session_reuse`
+
+For example, if `backend: claude`, read `claude.reviewer.command`, etc.
 
 ### Step 2: Internal Planning (superpowers)
 
@@ -89,22 +96,10 @@ After these complete, you should have a plan file (typically at `docs/superpower
 
 Now send the plan to an external AI tool for a fresh-perspective review.
 
-**First iteration — start new session and capture session ID:**
+The review prompt is the same for all backends:
 
-> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
-> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
-
-```bash
-PLAN_FILE="<path-to-plan-file>"
-SESSION_FILE="/tmp/devflow-plan-review.session"
-OUTPUT_FILE="/tmp/devflow-plan-review-output.txt"
-EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
-
-# First call: use --json to capture session ID
-<REVIEWER_COMMAND> <REVIEWER_FLAGS> --json \
-  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
-  -o "$OUTPUT_FILE" \
-  "You are reviewing an implementation plan. You must NOT create or modify any files. READ-ONLY review.
+```
+REVIEW_PROMPT="You are reviewing an implementation plan. You must NOT create or modify any files. READ-ONLY review.
 
 Review for:
 1. COMPLETENESS — edge cases, missing steps?
@@ -116,18 +111,81 @@ Review for:
 Respond: APPROVED or ISSUES (severity: critical/important/minor + fix).
 
 Plan:
-$(cat $PLAN_FILE)" 2>/dev/null | tee "$EVENTS_FILE"
+$(cat $PLAN_FILE)"
+```
 
-# Extract and store session ID for reuse
+Common variables:
+```bash
+PLAN_FILE="<path-to-plan-file>"
+SESSION_FILE="/tmp/devflow-plan-review.session"
+OUTPUT_FILE="/tmp/devflow-plan-review-output.txt"
+```
+
+---
+
+#### Backend: claude
+
+**First iteration — new session:**
+```bash
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  "$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+
+# Capture session ID
+jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
+```
+
+**Subsequent iterations — resume session:**
+```bash
+SESSION_ID=$(cat "$SESSION_FILE")
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  --resume "$SESSION_ID" \
+  "Issues were addressed. Re-review this updated plan.
+
+Respond: APPROVED or ISSUES.
+
+Updated plan:
+$(cat $PLAN_FILE)"
+```
+
+**Example (first call):**
+```bash
+claude -p --output-format json --permission-mode plan \
+  --model opus --effort max \
+  "Review this plan... $(cat docs/superpowers/plans/2026-03-18-caching.md)" \
+  | tee /tmp/devflow-plan-review-output.txt
+```
+
+**Parse result:**
+```bash
+jq -r '.result' /tmp/devflow-plan-review-output.txt
+```
+
+---
+
+#### Backend: codex
+
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
+**First iteration — new session:**
+```bash
+EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
+
+codex exec --full-auto --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+  -o "$OUTPUT_FILE" \
+  "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
+
+# Capture session ID
 head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
 ```
 
-**Subsequent iterations — resume existing session:**
-
+**Subsequent iterations — resume session:**
 ```bash
 SESSION_ID=$(cat "$SESSION_FILE")
-
-<REVIEWER_COMMAND> resume "$SESSION_ID" <REVIEWER_FLAGS> \
+codex exec resume "$SESSION_ID" --full-auto \
   -o "$OUTPUT_FILE" \
   "Issues were addressed. Re-review this updated plan.
 
@@ -137,24 +195,13 @@ Updated plan:
 $(cat $PLAN_FILE)"
 ```
 
-The resumed session preserves full context — the reviewer already knows the plan structure and prior feedback, saving ~20k tokens per iteration.
+---
 
-**Example with codex (first call):**
-```bash
-codex exec --full-auto --json -m gpt-5.4 -c 'model_reasoning_effort="xhigh"' \
-  -o /tmp/review-output.txt \
-  "Review this plan... $(cat docs/superpowers/plans/2026-03-18-caching.md)" \
-  2>/dev/null | tee /tmp/review-events.jsonl
-```
+The resumed session preserves full context — the reviewer already knows the plan
+structure and prior feedback, saving ~20k tokens per iteration.
 
-**Example with codex (resume):**
-```bash
-codex exec resume "$SESSION_ID" --full-auto \
-  -o /tmp/review-output.txt \
-  "Issues fixed. Re-review: $(cat docs/superpowers/plans/2026-03-18-caching.md)"
-```
-
-**If session_reuse is false**, use `--ephemeral` flag and skip session capture.
+**If session_reuse is false**: for codex use `--ephemeral`; for claude use
+`--no-session-persistence`. Skip session capture in both cases.
 
 ### Step 4: Process Review Response
 
@@ -172,10 +219,18 @@ Parse the external reviewer's response:
 
 If the plan is approved and implementation follows (e.g., in `devflow:run`):
 
+**claude backend:**
 ```bash
-# Resume the review session with lower effort for implementation
 SESSION_ID=$(cat /tmp/devflow-plan-review.session)
+claude -p --output-format json --permission-mode default \
+  --model <implementer.model> --effort <implementer.effort> \
+  --resume "$SESSION_ID" \
+  "Implement the plan you just reviewed. The plan is approved. Create the files."
+```
 
+**codex backend:**
+```bash
+SESSION_ID=$(cat /tmp/devflow-plan-review.session)
 codex exec resume "$SESSION_ID" --full-auto \
   -m <implementer.model> -c 'model_reasoning_effort="<implementer.effort>"' \
   -o /tmp/devflow-impl-output.txt \
