@@ -4,7 +4,7 @@ description: Plan a feature with cross-tool review loop (Claude + Codex). Delega
 
 # Devflow: Plan
 
-Cross-tool planning workflow. Uses superpowers internally, calls an external AI tool (Codex CLI by default) for review.
+Cross-tool planning workflow. Uses superpowers internally, calls an external AI tool (configured via `backend` key) for review.
 
 Each phase is independent — you can run them all or invoke a single phase.
 
@@ -23,11 +23,12 @@ echo "=== Global config ===" && cat ~/.devflow/config.yaml 2>/dev/null || echo "
 echo "=== Project config ===" && cat .devflow.yaml 2>/dev/null || echo "(none)"
 ```
 
-Extract from config (defaults shown):
-- `reviewer.command`: `codex exec` | `reviewer.flags`: `--full-auto`
-- `reviewer.model`: `gpt-5.4` | `reviewer.effort`: `xhigh`
-- `implementer.model`: `gpt-5.4` | `implementer.effort`: `high`
-- `session_reuse`: `true`
+**Resolve the active backend** from the `backend` key (default: `claude`), then read
+from the matching section (`claude.*` or `codex.*`):
+- `<backend>.reviewer.command` | `<backend>.reviewer.flags`
+- `<backend>.reviewer.model` | `<backend>.reviewer.effort`
+- `<backend>.implementer.model` | `<backend>.implementer.effort`
+- `<backend>.session_reuse`
 
 ---
 
@@ -44,21 +45,13 @@ After completion, note the plan file path (typically `docs/superpowers/plans/YYY
 
 ## Phase 3 — External Cross-Tool Review
 
-**First iteration — start session and capture ID:**
-
-> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
-> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
-
+Common variables:
 ```bash
 PLAN_FILE="<path-to-plan>"
 SESSION_FILE="/tmp/devflow-plan-review.session"
 OUTPUT_FILE="/tmp/devflow-plan-review-output.txt"
-EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
 
-codex exec --full-auto --json \
-  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
-  -o "$OUTPUT_FILE" \
-  "You are reviewing an implementation plan. READ-ONLY review, do NOT modify files.
+REVIEW_PROMPT="You are reviewing an implementation plan. READ-ONLY review, do NOT modify files.
 
 Review for:
 1. COMPLETENESS — all edge cases covered? Missing steps?
@@ -70,26 +63,57 @@ Review for:
 Respond: APPROVED or ISSUES (severity: critical/important/minor + fix).
 
 Plan:
-$(cat $PLAN_FILE)" 2>/dev/null | tee "$EVENTS_FILE"
+$(cat $PLAN_FILE)"
+```
 
-# Capture session ID
+### Backend: claude
+
+**First iteration:**
+```bash
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  "$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
+```
+
+**Subsequent iterations — resume session:**
+```bash
+SESSION_ID=$(cat "$SESSION_FILE")
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  --resume "$SESSION_ID" \
+  "Issues were addressed. Re-review this updated plan.
+Respond: APPROVED or ISSUES.
+Updated plan:
+$(cat $PLAN_FILE)"
+```
+
+### Backend: codex
+
+> **WARNING**: Codex CLI has NO `--effort` flag. Use `-c 'model_reasoning_effort="..."'`.
+
+**First iteration:**
+```bash
+EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
+codex exec --full-auto --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+  -o "$OUTPUT_FILE" \
+  "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
 head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
 ```
 
 **Subsequent iterations — resume session:**
-
 ```bash
 SESSION_ID=$(cat "$SESSION_FILE")
 codex exec resume "$SESSION_ID" --full-auto \
   -o "$OUTPUT_FILE" \
   "Issues were addressed. Re-review this updated plan.
 Respond: APPROVED or ISSUES.
-
 Updated plan:
 $(cat $PLAN_FILE)"
 ```
 
-Resuming saves ~20k tokens per iteration (Codex keeps full context).
+Resuming saves ~20k tokens per iteration (preserves full context).
 
 ---
 

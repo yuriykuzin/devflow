@@ -99,11 +99,12 @@ cat ~/.devflow/config.yaml 2>/dev/null || echo "Using defaults"
 cat .devflow.yaml 2>/dev/null || echo "No project override"
 ```
 
-Extract model tiers from config:
-- **Reviewer**: `reviewer.model` + `reviewer.effort` (default: `gpt-5.4` + `xhigh`)
-- **Implementer**: `implementer.model` + `implementer.effort` (default: `gpt-5.4` + `high`)
+**Resolve the active backend** from the `backend` key (default: `claude`), then read
+settings from the matching section (`claude.*` or `codex.*`):
+- **Reviewer**: `<backend>.reviewer.model` + `<backend>.reviewer.effort`
+- **Implementer**: `<backend>.implementer.model` + `<backend>.implementer.effort`
 - **Orchestrator** (you): uses its own model (e.g., `opus-4.6` in Windsurf, whatever the host agent runs)
-- **Session reuse**: `session_reuse` (default: `true`)
+- **Session reuse**: `<backend>.session_reuse` (default: `true`)
 
 **Create a TodoWrite/todo_list with phases to track progress.**
 

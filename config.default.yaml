@@ -2,26 +2,64 @@
 # Copy to ~/.devflow/config.yaml and customize as needed.
 # Per-project overrides: place .devflow.yaml in project root.
 
-# External reviewer — called via CLI to review plans and code
-reviewer:
-  tool: codex              # codex | claude | custom
-  command: "codex exec"    # CLI executable + subcommand
-  flags: "--full-auto"     # non-interactive mode flag(s)
-  model: "gpt-5.4"         # model for review
-  effort: "xhigh"          # reasoning effort (passed via -c 'model_reasoning_effort=...', NOT --effort)
+# ──────────────────────────────────────────────────────────────
+# BACKEND SELECTOR — change this one line to switch everything
+# ──────────────────────────────────────────────────────────────
+backend: claude              # codex | claude
 
-# External implementer — called via CLI to implement plans
-implementer:
-  tool: codex
-  command: "codex exec"
-  flags: "--full-auto"
-  model: "gpt-5.4"         # model for implementation
-  effort: "high"           # reasoning effort (passed via -c 'model_reasoning_effort=...', NOT --effort)
+# ──────────────────────────────────────────────────────────────
+# Backend: claude (Claude Code CLI)
+# ──────────────────────────────────────────────────────────────
+claude:
+  reviewer:
+    command: "claude"
+    flags: "-p --output-format json --permission-mode plan"
+    model: "opus"                    # alias: opus → claude-opus-4-6
+    effort: "max"                    # --effort max (thorough reviews)
+  implementer:
+    command: "claude"
+    flags: "-p --output-format json --permission-mode default"
+    model: "sonnet"                  # alias: sonnet → claude-sonnet-4-6
+    effort: "high"                   # --effort high (fast implementation)
+  session_reuse: true
+  # Protocol notes:
+  #   Headless mode:    -p (print mode, non-interactive)
+  #   Model:            --model <alias|full-name>
+  #   Effort:           --effort <low|medium|high|max>
+  #   JSON output:      --output-format json
+  #   Session capture:  jq -r '.session_id' from JSON output
+  #   Session resume:   claude -p --resume <session_id>
+  #   Read-only review: --permission-mode plan (no file writes)
+  #   Full access:      --permission-mode default
+  #   Tool restrict:    --allowedTools "Read Grep Glob"
 
-# Session reuse — keep Codex context across review iterations
-# When true, devflow captures the session ID from the first call and resumes
-# subsequent iterations in the same session. Saves ~20k tokens per iteration.
-session_reuse: true
+# ──────────────────────────────────────────────────────────────
+# Backend: codex (Codex CLI)
+# ──────────────────────────────────────────────────────────────
+codex:
+  reviewer:
+    command: "codex exec"
+    flags: "--full-auto"
+    model: "gpt-5.4"
+    effort: "xhigh"                  # via -c 'model_reasoning_effort="..."'
+  implementer:
+    command: "codex exec"
+    flags: "--full-auto"
+    model: "gpt-5.4"
+    effort: "high"                   # via -c 'model_reasoning_effort="..."'
+  session_reuse: true
+  # Protocol notes:
+  #   Headless mode:    --full-auto
+  #   Model:            -m <model>
+  #   Effort:           -c 'model_reasoning_effort="<effort>"' (NOT --effort)
+  #   JSON output:      --json (JSONL events on stdout)
+  #   Session capture:  head -1 events.jsonl | jq -r '.thread_id'
+  #   Session resume:   codex exec resume <session_id>
+  #   Output file:      -o <path>
+
+# ──────────────────────────────────────────────────────────────
+# Shared settings (apply regardless of backend)
+# ──────────────────────────────────────────────────────────────
 
 # Default autonomy mode
 # attended    — ask user on ambiguity (default)

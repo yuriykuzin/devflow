@@ -4,7 +4,7 @@ description: Cross-tool review of existing code or changes. Sends your work to a
 
 # Devflow: Review
 
-Cross-tool review workflow. Uses superpowers for internal review, calls an external AI tool (Codex CLI by default) for independent review, then synthesizes both.
+Cross-tool review workflow. Uses superpowers for internal review, calls an external AI tool (configured via `backend` key) for independent review, then synthesizes both.
 
 ## Prerequisites
 - External reviewer CLI installed (`codex` or `claude`)
@@ -21,10 +21,11 @@ echo "=== Global config ===" && cat ~/.devflow/config.yaml 2>/dev/null || echo "
 echo "=== Project config ===" && cat .devflow.yaml 2>/dev/null || echo "(none)"
 ```
 
-Extract from config (defaults shown):
-- `reviewer.command`: `codex exec` | `reviewer.flags`: `--full-auto`
-- `reviewer.model`: `gpt-5.4` | `reviewer.effort`: `xhigh`
-- `session_reuse`: `true`
+**Resolve the active backend** from the `backend` key (default: `claude`), then read
+from the matching section (`claude.*` or `codex.*`):
+- `<backend>.reviewer.*` (command, flags, model, effort)
+- `<backend>.implementer.*` (command, flags, model, effort)
+- `<backend>.session_reuse`
 
 ---
 
@@ -63,20 +64,12 @@ This gives context for evaluating the external review later.
 
 ## Phase 4 — External Cross-Tool Review
 
-**First iteration — new session with model flags:**
-
-> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
-> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
-
+Common variables:
 ```bash
 SESSION_FILE="/tmp/devflow-review.session"
 OUTPUT_FILE="/tmp/devflow-review-output.txt"
-EVENTS_FILE="/tmp/devflow-review-events.jsonl"
 
-<REVIEWER_COMMAND> <REVIEWER_FLAGS> --json \
-  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
-  -o "$OUTPUT_FILE" \
-  "You are performing a code review. READ-ONLY, do not modify files.
+REVIEW_PROMPT="You are performing a code review. READ-ONLY, do not modify files.
 
 REVIEW FOCUS: <user-specified focus or 'general'>
 
@@ -93,16 +86,47 @@ For each issue: severity (critical/important/minor/nitpick), file:line, what's w
 End with: APPROVED (no blockers) or CHANGES_REQUESTED (has critical/important issues).
 
 Changes to review:
-$REVIEW_CONTENT" 2>/dev/null | tee "$EVENTS_FILE"
+$REVIEW_CONTENT"
+```
 
-# Capture session ID for reuse
+### Backend: claude
+
+**First iteration:**
+```bash
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  "$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
+jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
+```
+
+**Subsequent iterations — resume session:**
+```bash
+SESSION_ID=$(cat "$SESSION_FILE")
+claude -p --output-format json --permission-mode plan \
+  --model <reviewer.model> --effort <reviewer.effort> \
+  --resume "$SESSION_ID" \
+  "Issues were fixed. Re-review the updated changes:
+$REVIEW_CONTENT"
+```
+
+### Backend: codex
+
+> **WARNING**: Codex CLI has NO `--effort` flag. Use `-c 'model_reasoning_effort="..."'`.
+
+**First iteration:**
+```bash
+EVENTS_FILE="/tmp/devflow-review-events.jsonl"
+codex exec --full-auto --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+  -o "$OUTPUT_FILE" \
+  "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
 head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
 ```
 
 **Subsequent iterations — resume session:**
 ```bash
 SESSION_ID=$(cat "$SESSION_FILE")
-<REVIEWER_COMMAND> resume "$SESSION_ID" <REVIEWER_FLAGS> \
+codex exec resume "$SESSION_ID" --full-auto \
   -o "$OUTPUT_FILE" \
   "Issues were fixed. Re-review the updated changes:
 $REVIEW_CONTENT"
@@ -168,7 +192,18 @@ If user asks to fix and re-review:
 2. Re-run Phase 4 with updated diff (resume existing session)
 3. Repeat until APPROVED or max iterations
 
-**Implementation handoff** — if fixes are complex, resume with implementer effort:
+**Implementation handoff** — if fixes are complex:
+
+**claude:**
+```bash
+SESSION_ID=$(cat /tmp/devflow-review.session)
+claude -p --output-format json --permission-mode default \
+  --model <implementer.model> --effort <implementer.effort> \
+  --resume "$SESSION_ID" \
+  "Fix the issues you found in your review."
+```
+
+**codex:**
 ```bash
 SESSION_ID=$(cat /tmp/devflow-review.session)
 codex exec resume "$SESSION_ID" --full-auto \
