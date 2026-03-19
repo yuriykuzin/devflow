@@ -76,13 +76,16 @@ This gives you context for evaluating the external review later.
 
 **First iteration — new session with model flags:**
 
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
 ```bash
 SESSION_FILE="/tmp/devflow-review.session"
 OUTPUT_FILE="/tmp/devflow-review-output.txt"
 EVENTS_FILE="/tmp/devflow-review-events.jsonl"
-MODEL_FLAGS='-m <reviewer.model> -c '\''model_reasoning_effort="<reviewer.effort>"'\'''
 
-<REVIEWER_COMMAND> <REVIEWER_FLAGS> --json $MODEL_FLAGS \
+<REVIEWER_COMMAND> <REVIEWER_FLAGS> --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
   -o "$OUTPUT_FILE" \
   "You are performing a code review. READ-ONLY, do not modify files.
 

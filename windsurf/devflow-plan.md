@@ -46,16 +46,17 @@ After completion, note the plan file path (typically `docs/superpowers/plans/YYY
 
 **First iteration — start session and capture ID:**
 
+> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
+> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+
 ```bash
 PLAN_FILE="<path-to-plan>"
 SESSION_FILE="/tmp/devflow-plan-review.session"
 OUTPUT_FILE="/tmp/devflow-plan-review-output.txt"
 EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
 
-# Model flags from config
-MODEL_FLAGS='-m <reviewer.model> -c '\''model_reasoning_effort="<reviewer.effort>"'\'''
-
-codex exec --full-auto --json $MODEL_FLAGS \
+codex exec --full-auto --json \
+  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
   -o "$OUTPUT_FILE" \
   "You are reviewing an implementation plan. READ-ONLY review, do NOT modify files.
 
