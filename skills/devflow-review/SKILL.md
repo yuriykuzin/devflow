@@ -208,6 +208,33 @@ codex exec resume "$SESSION_ID" --full-auto \
 $REVIEW_CONTENT"
 ```
 
+#### Rate-limit fallback (codex backend)
+
+If a codex command fails with "limit reached", "rate limit", or "quota exceeded"
+in its output or stderr:
+
+1. Check config for `codex.fallback_command` (default: `codex-local-proxy`)
+2. If set and the command exists on `$PATH`:
+   - Replace `codex` with `<fallback_command>` in the failed command
+   - `-c` flags, `exec` subcommand, and all other flags stay identical
+   - Retry once
+   - If fallback also fails → escalate to user
+3. If `fallback_command` is empty or command not found → escalate immediately
+
+**Detection** — check both exit code and output:
+```bash
+if grep -qiE 'limit reached|rate.?limit|quota exceeded|too many requests' "$OUTPUT_FILE" /tmp/devflow-*-events.jsonl 2>/dev/null; then
+  FALLBACK=$(cat ~/.devflow/config.yaml | python3 -c "import sys,yaml; c=yaml.safe_load(sys.stdin); print(c.get('codex',{}).get('fallback_command',''))" 2>/dev/null)
+  if [ -n "$FALLBACK" ] && command -v "$FALLBACK" &>/dev/null; then
+    echo "Rate limited — retrying with $FALLBACK"
+    # Re-run the same command with codex replaced by $FALLBACK
+  fi
+fi
+```
+
+**Note**: Fallback starts a new session (rate-limited session can't be resumed
+via proxy). Update `$SESSION_FILE` with the new session ID from fallback.
+
 ### Step 5: Synthesize Reviews
 
 Combine internal (superpowers) and external review findings:
@@ -286,6 +313,9 @@ codex -c 'model_reasoning_effort="<implementer.effort>"' \
   -o /tmp/devflow-review-fix-output.txt \
   "Fix the issues you found in your review."
 ```
+
+> Rate-limit fallback applies here too — if codex hits limits during
+> implementation handoff, retry with `codex.fallback_command`.
 
 ## Key Rules
 

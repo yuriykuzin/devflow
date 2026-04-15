@@ -48,6 +48,11 @@ codex:
     model: "gpt-5.4"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   session_reuse: true
+  # Rate-limit fallback: when codex hits "limit reached", retry with this
+  # command instead. Typically codex-local-proxy (same CLI interface, routes
+  # through a local proxy with its own API key / rate limit pool).
+  # Comment out or set to "" to disable fallback (fail immediately).
+  fallback_command: "codex-local-proxy"
   # Protocol notes:
   #   Headless mode:    --full-auto
   #   Model:            -m <model>
