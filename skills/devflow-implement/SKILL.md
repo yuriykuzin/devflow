@@ -130,7 +130,15 @@ git diff HEAD > /tmp/devflow-impl-diff.patch
 git diff <start-commit>..HEAD > /tmp/devflow-impl-diff.patch
 ```
 
-### Step 5: External Cross-Tool Review
+### Step 5: Internal + External Review (parallel)
+
+Launch both reviews simultaneously — they are independent.
+
+**Internal review**: Invoke `superpowers:requesting-code-review` as background sub-agents.
+**External review**: Launch external tool command below at the same time.
+Both feed into Step 6 (Process Review Response) for synthesis.
+
+#### External Cross-Tool Review
 
 Send the implementation to an external AI tool for review.
 
@@ -380,7 +388,7 @@ Announce to user:
 ## Key Rules
 
 - **Superpowers handles execution** — devflow only adds the external review loop after
-- **Never skip internal quality gates** — superpowers' TDD, spec review, and code quality review happen FIRST
-- **External review is the final gate** — it catches things the internal review missed
+- **Never skip internal quality gates** — superpowers' TDD, spec review, and code quality review still run
+- **Internal + external in parallel** — both are independent, synthesize after both complete
 - **Don't auto-commit** — leave changes in working directory unless user explicitly asks
 - **Large diffs**: chunk the review if diff > 50KB to stay within CLI token limits
