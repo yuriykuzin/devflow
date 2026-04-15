@@ -168,13 +168,17 @@ jq -r '.result' /tmp/devflow-plan-review-output.txt
 
 > **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
 > `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+> **CRITICAL**: All `-c` flags MUST go BEFORE the `exec` subcommand. Placing
+> them after `exec` creates a fresh config context that shadows top-level
+> `-c` flags (e.g., from `codex-local-proxy`), causing codex to fall back to
+> its default provider.
 
 **First iteration — new session:**
 ```bash
 EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
 
-codex exec --full-auto --json \
-  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+codex -c 'model_reasoning_effort="<reviewer.effort>"' \
+  exec --full-auto --json -m <reviewer.model> \
   -o "$OUTPUT_FILE" \
   "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
 
@@ -231,8 +235,8 @@ claude -p --output-format json --permission-mode default \
 **codex backend:**
 ```bash
 SESSION_ID=$(cat /tmp/devflow-plan-review.session)
-codex exec resume "$SESSION_ID" --full-auto \
-  -m <implementer.model> -c 'model_reasoning_effort="<implementer.effort>"' \
+codex -c 'model_reasoning_effort="<implementer.effort>"' \
+  exec resume "$SESSION_ID" --full-auto -m <implementer.model> \
   -o /tmp/devflow-impl-output.txt \
   "Implement the plan you just reviewed. The plan is approved. Create the files."
 ```

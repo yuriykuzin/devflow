@@ -91,12 +91,16 @@ $(cat $PLAN_FILE)"
 ### Backend: codex
 
 > **WARNING**: Codex CLI has NO `--effort` flag. Use `-c 'model_reasoning_effort="..."'`.
+> **CRITICAL**: All `-c` flags MUST go BEFORE the `exec` subcommand. Placing
+> them after `exec` creates a fresh config context that shadows top-level
+> `-c` flags (e.g., from `codex-local-proxy`), causing codex to fall back to
+> its default provider.
 
 **First iteration:**
 ```bash
 EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
-codex exec --full-auto --json \
-  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+codex -c 'model_reasoning_effort="<reviewer.effort>"' \
+  exec --full-auto --json -m <reviewer.model> \
   -o "$OUTPUT_FILE" \
   "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
 head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"

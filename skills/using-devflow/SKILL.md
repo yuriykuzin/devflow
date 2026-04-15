@@ -73,7 +73,8 @@ jq -r '.session_id' /tmp/review-output.txt
 
 ```bash
 # First call — captures session ID via --json JSONL events
-codex exec --full-auto --json -m gpt-5.4 -c 'model_reasoning_effort="xhigh"' \
+codex -c 'model_reasoning_effort="xhigh"' \
+  exec --full-auto --json -m gpt-5.4 \
   -o /tmp/review-output.txt "Review this plan: ..." 2>/dev/null | tee /tmp/events.jsonl
 
 # Resume session

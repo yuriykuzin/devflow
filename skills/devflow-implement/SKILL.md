@@ -204,13 +204,17 @@ claude -p --output-format json --permission-mode plan \
 
 > **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
 > `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
+> **CRITICAL**: All `-c` flags MUST go BEFORE the `exec` subcommand. Placing
+> them after `exec` creates a fresh config context that shadows top-level
+> `-c` flags (e.g., from `codex-local-proxy`), causing codex to fall back to
+> its default provider.
 
 **Option A: Resume plan-review session:**
 ```bash
 if [ -f "$PLAN_SESSION_FILE" ]; then
   SESSION_ID=$(cat "$PLAN_SESSION_FILE")
-  codex exec resume "$SESSION_ID" --full-auto \
-    -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+  codex -c 'model_reasoning_effort="<reviewer.effort>"' \
+    exec resume "$SESSION_ID" --full-auto -m <reviewer.model> \
     -o "$OUTPUT_FILE" \
     "The plan you reviewed is now implemented. Review the code changes.
 
@@ -222,8 +226,8 @@ fi
 **Option B: Fresh session:**
 ```bash
 EVENTS_FILE="/tmp/devflow-impl-review-events.jsonl"
-codex exec --full-auto --json \
-  -m <reviewer.model> -c 'model_reasoning_effort="<reviewer.effort>"' \
+codex -c 'model_reasoning_effort="<reviewer.effort>"' \
+  exec --full-auto --json -m <reviewer.model> \
   -o "$OUTPUT_FILE" \
   "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
 head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
@@ -267,8 +271,8 @@ claude -p --output-format json --permission-mode default \
 **codex backend:**
 ```bash
 SESSION_ID=$(cat "$SESSION_FILE")
-codex exec resume "$SESSION_ID" --full-auto \
-  -m <implementer.model> -c 'model_reasoning_effort="<implementer.effort>"' \
+codex -c 'model_reasoning_effort="<implementer.effort>"' \
+  exec resume "$SESSION_ID" --full-auto -m <implementer.model> \
   -o /tmp/devflow-impl-fix-output.txt \
   "Fix the issues you found in your review. Here are the files: ..."
 ```
