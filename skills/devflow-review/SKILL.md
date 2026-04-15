@@ -79,7 +79,54 @@ SESSION_FILE="/tmp/devflow-review.session"
 OUTPUT_FILE="/tmp/devflow-review-output.txt"
 ```
 
-The review prompt (same for all backends):
+#### Construct the review prompt
+
+First, read persona definitions from `skills/devflow-review/references/review-personas.md`.
+
+Check config for `review_personas.enabled` (default: `true`) and `review_personas.personas`
+(default: all five). If disabled, use the **fallback single-reviewer prompt** below.
+
+**Multi-persona review prompt** (default):
+```
+REVIEW_PROMPT="You are a lead code reviewer. You MUST spawn parallel sub-agents
+to review the code from multiple perspectives, then synthesize their findings.
+READ-ONLY — do not modify files.
+
+IMPORTANT: Spawn each reviewer as an independent sub-agent running in parallel.
+Each sub-agent receives the full review content and returns structured findings.
+
+REVIEW FOCUS: <user-specified focus or 'general'>
+
+## Sub-agents to spawn
+
+<< For each enabled persona, include its section from review-personas.md.
+   Default: all five (Architect, Security Nerd, Junior Dev, Performance Hawk,
+   QA Devil's Advocate). Omit any persona disabled in config. >>
+
+Each sub-agent must return: list of findings with severity
+(critical/important/minor/nitpick), file:line, description, and suggested fix.
+
+## After all sub-agents complete
+
+Synthesize into a unified review:
+1. DEDUPLICATE — same issue from multiple personas → merge, note who found it
+2. CROSS-REFERENCE — issues found by 2+ personas get confidence boost
+3. PRIORITIZE — critical/important first
+4. FORMAT — group by file, then severity
+
+For each issue:
+- Severity: critical / important / minor / nitpick
+- File and line (approximate)
+- Which persona(s) found it
+- What's wrong and how to fix it
+
+End with: APPROVED (no critical/important) or CHANGES_REQUESTED
+
+Changes to review:
+$REVIEW_CONTENT"
+```
+
+**Fallback single-reviewer prompt** (when `review_personas.enabled: false`):
 ```
 REVIEW_PROMPT="You are performing a code review. READ-ONLY, do not modify files.
 
@@ -190,7 +237,7 @@ Present findings to user and save report:
 ## Issues
 
 ### Critical
-1. **[file:line]** <description> — found by: <tool(s)>
+1. **[file:line]** <description> — found by: <persona(s)> via <tool(s)>
 
 ### Important
 ...

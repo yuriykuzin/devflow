@@ -96,8 +96,57 @@ After these complete, you should have a plan file (typically at `docs/superpower
 
 Now send the plan to an external AI tool for a fresh-perspective review.
 
-The review prompt is the same for all backends:
+#### Construct the review prompt
 
+First, read persona definitions from `skills/devflow-review/references/review-personas.md`
+(see the "Plan Review Variant" section for plan-specific persona lenses).
+
+Check config for `review_personas.enabled` (default: `true`) and `review_personas.personas`
+(default: all five). If disabled, use the **fallback single-reviewer prompt** below.
+
+**Multi-persona plan review prompt** (default):
+```
+REVIEW_PROMPT="You are a lead reviewer evaluating an implementation plan.
+You MUST spawn parallel sub-agents to review the plan from multiple perspectives,
+then synthesize their findings. READ-ONLY — do not create or modify any files.
+
+IMPORTANT: Spawn each reviewer as an independent sub-agent running in parallel.
+Each sub-agent receives the full plan and returns structured findings.
+
+## Sub-agents to spawn
+
+<< For each enabled persona, include its plan-review variant:
+   - Architect: completeness, architecture soundness, missing edge cases in design
+   - Security Nerd: security implications of proposed design, threat model gaps
+   - Junior Dev: is the plan clear enough to implement without ambiguity?
+   - Performance Hawk: scalability concerns in proposed approach
+   - QA Devil's Advocate: testability, missing acceptance criteria, gaps in test plan
+   Omit any persona disabled in config. >>
+
+Each sub-agent must return: list of findings with severity
+(critical/important/minor), description, and suggested fix.
+
+## After all sub-agents complete
+
+Synthesize into a unified review:
+1. DEDUPLICATE — same issue from multiple personas → merge, note who found it
+2. CROSS-REFERENCE — issues found by 2+ personas get confidence boost
+3. PRIORITIZE — critical first
+4. FORMAT — group by plan section, then severity
+
+For each issue:
+- Severity: critical / important / minor
+- Plan section affected
+- Which persona(s) found it
+- What's wrong and how to fix it
+
+Respond: APPROVED or ISSUES.
+
+Plan:
+$(cat $PLAN_FILE)"
+```
+
+**Fallback single-reviewer prompt** (when `review_personas.enabled: false`):
 ```
 REVIEW_PROMPT="You are reviewing an implementation plan. You must NOT create or modify any files. READ-ONLY review.
 

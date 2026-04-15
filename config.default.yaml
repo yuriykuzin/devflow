@@ -72,6 +72,20 @@ output_dir: "docs/devflow/reports"
 # Maximum review iterations before escalating to user
 max_review_iterations: 7
 
+# ──────────────────────────────────────────────────────────────
+# Multi-persona review — external reviewer spawns sub-agents
+# with different review perspectives for deeper coverage.
+# See skills/devflow-review/references/review-personas.md
+# ──────────────────────────────────────────────────────────────
+review_personas:
+  enabled: true                       # false → single-reviewer fallback prompt
+  personas:
+    - architect                       # Martin Fowler — design, patterns, SOLID
+    - security                        # Ethical Hacker — OWASP, injection, auth
+    - readability                     # Junior Dev — clarity, confusion points, "why?"
+    - performance                     # Performance Hawk — N+1, allocations, complexity
+    - qa                              # Devil's Advocate — edge cases, error paths, races
+
 # Tool integrations — comment out to skip during install/uninstall.
 # If this section is absent, all detected tools are installed.
 integrations:
