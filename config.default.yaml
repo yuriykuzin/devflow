@@ -80,3 +80,16 @@ integrations:
   windsurf: true
   # cursor: true       # auto-detected from repo — no install step needed
   # gemini: true       # auto-detected from repo — no install step needed
+
+# ──────────────────────────────────────────────────────────────
+# Sandbox settings
+# ──────────────────────────────────────────────────────────────
+sandbox:
+  # Root directory for sandbox clones and registry
+  root: "~/.cache/devflow"
+  # Docker network for sandbox ↔ shared services communication
+  network: "devflow-shared"
+  # Default agent for new sandboxes (overridable via --agent flag)
+  default_agent: "claude"
+  # Cleanup: auto-destroy sandboxes older than this (0 = disabled)
+  auto_cleanup_hours: 0

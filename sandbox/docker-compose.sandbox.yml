@@ -1,0 +1,82 @@
+# docker-compose.sandbox.yml — sandbox compose template
+# Variables substituted by sandbox-up.sh at runtime:
+#   SANDBOX_IMAGE, CLONE_PATH, DJANGO_PORT, SANDBOX_ENV_FILE,
+#   SANDBOX_AGENT_ENV_FILE, SANDBOX_WORKER_ENV_FILE
+#
+# Auth mounts and SSH key mount are injected dynamically by sandbox-up.sh
+
+services:
+  sandbox-init:
+    image: ${SANDBOX_IMAGE}
+    volumes:
+      - ${CLONE_PATH}:/app
+    tmpfs:
+      - /tmp
+      - /home/dev-user
+    env_file:
+      - ${SANDBOX_ENV_FILE}
+    command: /sandbox-init.sh
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    networks:
+      - devflow-shared
+
+  django:
+    image: ${SANDBOX_IMAGE}
+    depends_on:
+      sandbox-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${CLONE_PATH}:/app
+      # Auth mounts injected by sandbox-up.sh via COMPOSE_FILE override
+    tmpfs:
+      - /tmp
+      - /home/dev-user
+    env_file:
+      - ${SANDBOX_ENV_FILE}
+      - ${SANDBOX_AGENT_ENV_FILE}
+    entrypoint: /sandbox-bootstrap.sh
+    command: ${DJANGO_COMMAND:-/start}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
+      interval: 5s
+      retries: 12
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    ports:
+      - "${DJANGO_PORT}:8000"
+    networks:
+      - devflow-shared
+
+  celeryworker:
+    image: ${SANDBOX_IMAGE}
+    depends_on:
+      sandbox-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${CLONE_PATH}:/app
+    tmpfs:
+      - /tmp
+      - /home/dev-user
+    env_file:
+      - ${SANDBOX_ENV_FILE}
+      - ${SANDBOX_WORKER_ENV_FILE}
+    entrypoint: /sandbox-bootstrap.sh
+    command: ${CELERY_COMMAND:-/start-celeryworker}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges
+    networks:
+      - devflow-shared
+
+networks:
+  devflow-shared:
+    external: true

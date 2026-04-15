@@ -1,0 +1,85 @@
+# sandbox.yaml — Project sandbox configuration
+# Place this file at: {project}/.devflow/sandbox.yaml
+# Commit to main branch (sandbox-up.sh reads from `git show main:`)
+
+# ─── PROJECT ───────────────────────────────────────────────────
+# Short unique ID for this project (used in sandbox ID generation)
+project_slug: myproj
+
+# ─── BASE IMAGE ────────────────────────────────────────────────
+# Docker image to extend with AI CLIs + Playwright.
+# Contract: Debian-based, `dev-user` (uid 1000), Python, Node.js
+# DB-specific tools (e.g., postgresql-client) should be in the base image.
+base_image: myproject_local_django
+
+# ─── COMPOSE ───────────────────────────────────────────────────
+# Project's existing compose file (used for shared_services reference)
+compose_file: docker-compose.local.yml
+
+# Services from compose_file that are shared (not per-sandbox)
+shared_services: [postgres, redis]
+
+# Per-sandbox services and their commands
+sandbox_services:
+  django:
+    command: /start
+    healthcheck: "curl -f http://localhost:8000/health/ || exit 1"
+  celeryworker:
+    command: /start-celeryworker
+  # Add more services as needed (e.g., celerybeat)
+
+# ─── ENV FILES ─────────────────────────────────────────────────
+# Files to copy from project root to sandbox clone.
+# Patching (e.g., DB credentials) is handled by hooks/data-create.sh
+env_files:
+  copy:
+    - .env
+    # - .envs/.local/.django
+    # - .envs/.local/.postgres
+
+# ─── HOOKS ─────────────────────────────────────────────────────
+# All hooks are optional. Scripts must be executable.
+# devflow passes SANDBOX_ID, SANDBOX_BRANCH, SANDBOX_PROJECT, SANDBOX_CLONE as env.
+# TRUST: hooks are read from `git show main:` (immutable ref).
+hooks_dir: .devflow/hooks
+
+# ─── HOST ENV FORWARDING ──────────────────────────────────────
+# Host env vars to forward to the agent container (django only).
+# Supports wildcards (e.g., "LITELLM_PROXY_*").
+# Celeryworker does NOT receive these.
+forward_env:
+  - EXA_API_KEY
+  - GITHUB_TOKEN
+  # - JIRA_API_TOKEN
+  # - "LITELLM_PROXY_*"
+  # - "AGNO_*"
+
+# ─── AUTH (read-only at /auth/) ────────────────────────────────
+# Auth mounts — mounted read-only at /auth/ inside agent containers.
+# Copied to tmpfs $HOME on every container start (never persisted to /app).
+forward_auth:
+  - ~/.claude
+  - ~/.codex/auth.json
+  - ~/.config/gh
+
+# ─── GIT AUTH ──────────────────────────────────────────────────
+git:
+  # SSH key for git operations inside sandbox.
+  # Default: not set (git uses HTTPS via gh CLI auth).
+  # If set, only THIS specific key file is forwarded (not entire ~/.ssh/).
+  ssh_key: ""                    # e.g., "~/.ssh/id_ed25519"
+
+  # Git identity (for commits). Synthesized into a minimal .gitconfig.
+  # Raw ~/.gitconfig is NEVER copied.
+  # If empty, sandbox-up.sh reads from host `git config --global`.
+  user_name: ""                  # e.g., "Your Name"
+  user_email: ""                 # e.g., "you@company.com"
+
+# ─── MCP ───────────────────────────────────────────────────────
+# Inherit host MCP server config (sanitized: secrets stripped, paths rewritten)
+mcp_inherit: true
+
+# Filter which MCP servers to include/exclude
+mcp_filter:
+  allow: []       # Empty = allow all. If set, only these servers are included.
+  block: []       # These servers are always excluded.
