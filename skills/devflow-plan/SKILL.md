@@ -121,6 +121,7 @@ Each sub-agent receives the full plan and returns structured findings.
    - Junior Dev: is the plan clear enough to implement without ambiguity?
    - Performance Hawk: scalability concerns in proposed approach
    - QA Devil's Advocate: testability, missing acceptance criteria, gaps in test plan
+   - Codebase Conservator: does plan follow existing project patterns? will it create inconsistencies?
    Omit any persona disabled in config. >>
 
 Each sub-agent must return: list of findings with severity

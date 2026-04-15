@@ -162,8 +162,8 @@ Each sub-agent receives the full plan and diff and returns structured findings.
 ## Sub-agents to spawn
 
 << For each enabled persona, include its section from review-personas.md.
-   Default: all five (Architect, Security Nerd, Junior Dev, Performance Hawk,
-   QA Devil's Advocate). Omit any persona disabled in config. >>
+   Default: all six (Architect, Security Nerd, Junior Dev, Performance Hawk,
+   QA Devil's Advocate, Codebase Conservator). Omit any persona disabled in config. >>
 
 Additional focus for ALL personas: verify the implementation matches the plan.
 Flag any plan items that are missing or incorrectly implemented.
