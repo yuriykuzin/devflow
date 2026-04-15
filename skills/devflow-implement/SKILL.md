@@ -143,7 +143,58 @@ OUTPUT_FILE="/tmp/devflow-impl-review-output.txt"
 PLAN_SESSION_FILE="/tmp/devflow-plan-review.session"
 ```
 
-The review prompt (same for all backends):
+#### Construct the review prompt
+
+First, read persona definitions from `skills/devflow-review/references/review-personas.md`.
+
+Check config for `review_personas.enabled` (default: `true`) and `review_personas.personas`
+(default: all five). If disabled, use the **fallback single-reviewer prompt** below.
+
+**Multi-persona review prompt** (default):
+```
+REVIEW_PROMPT="You are a lead code reviewer. You MUST spawn parallel sub-agents
+to review this implementation against its plan from multiple perspectives,
+then synthesize their findings. READ-ONLY — do not modify files.
+
+IMPORTANT: Spawn each reviewer as an independent sub-agent running in parallel.
+Each sub-agent receives the full plan and diff and returns structured findings.
+
+## Sub-agents to spawn
+
+<< For each enabled persona, include its section from review-personas.md.
+   Default: all five (Architect, Security Nerd, Junior Dev, Performance Hawk,
+   QA Devil's Advocate). Omit any persona disabled in config. >>
+
+Additional focus for ALL personas: verify the implementation matches the plan.
+Flag any plan items that are missing or incorrectly implemented.
+
+Each sub-agent must return: list of findings with severity
+(critical/important/minor/nitpick), file:line, description, and suggested fix.
+
+## After all sub-agents complete
+
+Synthesize into a unified review:
+1. DEDUPLICATE — same issue from multiple personas → merge, note who found it
+2. CROSS-REFERENCE — issues found by 2+ personas get confidence boost
+3. PLAN COMPLIANCE — call out any unimplemented plan items as critical
+4. FORMAT — group by file, then severity
+
+For each issue:
+- Severity: critical / important / minor / nitpick
+- File and line (approximate)
+- Which persona(s) found it
+- What's wrong and how to fix it
+
+Respond: APPROVED or CHANGES_REQUESTED
+
+Plan:
+$PLAN
+
+Code changes (diff):
+$DIFF"
+```
+
+**Fallback single-reviewer prompt** (when `review_personas.enabled: false`):
 ```
 REVIEW_PROMPT="You are reviewing a code implementation against its plan. READ-ONLY review.
 
