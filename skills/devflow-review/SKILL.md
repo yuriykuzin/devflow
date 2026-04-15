@@ -62,14 +62,20 @@ REVIEW_STATS=$(git diff HEAD --stat)
 REVIEW_CONTENT=$(gh pr diff <number>)
 ```
 
-### Step 3: Internal Review First (superpowers)
+### Step 3: Internal + External Review (parallel)
 
-Before calling the external tool, do a quick internal review:
+Launch both reviews simultaneously — they are independent and can run in parallel.
+Synthesize findings after both complete.
 
+**Internal review** (runs as background sub-agents):
 1. **Invoke `superpowers:requesting-code-review`** (if not already done)
 2. Note any issues found internally
 
-This gives you context for evaluating the external review later.
+**External review** (runs via CLI in background):
+Launch the external tool command (Step 4 below) at the same time as internal review.
+Do NOT wait for internal review to finish before starting external.
+
+Both feed into Step 5 (Synthesis).
 
 ### Step 4: External Cross-Tool Review
 
@@ -319,7 +325,7 @@ codex -c 'model_reasoning_effort="<implementer.effort>"' \
 
 ## Key Rules
 
-- **Internal review FIRST** — gives you context to evaluate external feedback
+- **Internal + external in parallel** — both are independent reads, synthesize after both complete
 - **Never blindly accept external review** — cross-reference with your own analysis
 - **False positives are normal** — external tool lacks full project context, explain disagreements
 - **Report both perspectives** — user gets the full picture, decides what to act on
