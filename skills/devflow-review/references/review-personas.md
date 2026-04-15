@@ -6,6 +6,17 @@ issues that a single generalist review misses.
 
 ## Personas
 
+### Config Key Mapping
+
+| Config key    | Persona                     |
+|---------------|-----------------------------|
+| architect     | 1. Architect (Martin Fowler) |
+| security      | 2. Security Nerd (Ethical Hacker) |
+| readability   | 3. Junior Dev (Fresh Eyes)  |
+| performance   | 4. Performance Hawk         |
+| qa            | 5. QA Devil's Advocate      |
+| conservator   | 6. Codebase Conservator     |
+
 ### 1. Architect (Martin Fowler)
 
 **Focus**: Design quality, structural integrity, long-term maintainability.
@@ -149,6 +160,18 @@ End with: APPROVED (no critical/important issues) or CHANGES_REQUESTED
 
 {{REVIEW_TARGET}}
 ```
+
+## Graceful Degradation
+
+If the external tool cannot spawn real sub-agents (older Codex, restricted Claude
+in plan mode), it should simulate the perspectives sequentially. The prompt is
+designed to work in both modes — real parallel sub-agents or sequential simulation.
+
+After parsing the review response, check whether output contains per-persona
+sections. If the output is a monolithic review with no persona attribution:
+- Accept the single-reviewer output
+- Note the degradation in the review report
+- Do NOT re-run with individual persona prompts (diminishing returns)
 
 ## Plan Review Variant
 
