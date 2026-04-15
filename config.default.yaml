@@ -78,12 +78,19 @@ output_dir: "docs/devflow/reports"
 max_review_iterations: 7
 
 # ──────────────────────────────────────────────────────────────
-# Multi-persona review — external reviewer spawns sub-agents
-# with different review perspectives for deeper coverage.
+# Multi-persona review
+#
+# Internal review (host agent) spawns persona sub-agents in
+# parallel. External review (CLI) runs a single generalist
+# reviewer for an independent second opinion. Two axes of
+# diversity: personas × tools.
+#
 # See skills/devflow-review/references/review-personas.md
 # ──────────────────────────────────────────────────────────────
 review_personas:
   enabled: true                       # false → single-reviewer fallback prompt
+  # Which personas to spawn for internal multi-persona review.
+  # External review always uses the single generalist prompt.
   personas:
     - architect                       # Martin Fowler — design, patterns, SOLID
     - security                        # Ethical Hacker — OWASP, injection, auth
@@ -91,6 +98,29 @@ review_personas:
     - performance                     # Performance Hawk — N+1, allocations, complexity
     - qa                              # Devil's Advocate — edge cases, error paths, races
     - conservator                     # Codebase Conservator — naming, imports, style consistency
+
+  # ── Persona effort tiers ──────────────────────────────────
+  # Not all personas need the heaviest model. Security and
+  # Architect require deep creative reasoning (opus/max).
+  # Others need thoroughness but not raw intelligence (sonnet/max).
+  #
+  # Each persona maps to a tier; each tier defines model+effort
+  # per backend. Unrecognized personas default to "standard".
+  persona_tiers:
+    deep:                             # creative reasoning, adversarial thinking
+      personas: [architect, security]
+      claude:
+        model: "opus"
+        effort: "max"
+      codex:
+        effort: "xhigh"
+    standard:                         # thorough but less expensive
+      personas: [qa, readability, performance, conservator]
+      claude:
+        model: "sonnet"
+        effort: "max"
+      codex:
+        effort: "high"
 
 # Tool integrations — comment out to skip during install/uninstall.
 # If this section is absent, all detected tools are installed.
