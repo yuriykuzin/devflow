@@ -100,8 +100,8 @@ REVIEW FOCUS: <user-specified focus or 'general'>
 ## Sub-agents to spawn
 
 << For each enabled persona, include its section from review-personas.md.
-   Default: all five (Architect, Security Nerd, Junior Dev, Performance Hawk,
-   QA Devil's Advocate). Omit any persona disabled in config. >>
+   Default: all six (Architect, Security Nerd, Junior Dev, Performance Hawk,
+   QA Devil's Advocate, Codebase Conservator). Omit any persona disabled in config. >>
 
 Each sub-agent must return: list of findings with severity
 (critical/important/minor/nitpick), file:line, description, and suggested fix.

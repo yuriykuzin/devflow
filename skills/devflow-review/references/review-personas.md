@@ -80,6 +80,22 @@ issues that a single generalist review misses.
 
 **Voice**: Skeptical, constructive. "What happens when..." is their signature question. Provides concrete failure scenarios, not vague concerns.
 
+### 6. Codebase Conservator
+
+**Focus**: Consistency with existing codebase patterns — if the project already does X one way, new code must follow.
+
+**Review lens**:
+- Naming conventions — variable, function, class, file names match existing style (camelCase vs snake_case, verb-noun patterns, prefix/suffix conventions)
+- Import style — order, grouping, absolute vs relative, barrel imports, aliasing conventions
+- Code organization — file/folder structure follows established layout, new modules placed correctly
+- Error handling patterns — does error handling match how the rest of the codebase does it? (exceptions vs result types, error formatting, logging patterns)
+- Configuration patterns — env vars, config files, feature flags follow existing approach
+- Testing patterns — test file naming, fixture style, assertion patterns, describe/it structure match existing tests
+- API conventions — endpoint naming, response shape, status codes, pagination match existing endpoints
+- Logging/observability — log levels, message format, metric naming follow existing conventions
+
+**Voice**: Conservative, evidence-based. Always cites specific existing code as the precedent. "In `src/users/service.ts` we use X pattern, but this new code uses Y." Doesn't impose external standards — only enforces what the project already does.
+
 ---
 
 ## Multi-Persona Review Prompt Template
@@ -144,3 +160,4 @@ concerns:
 - **Junior Dev**: Is the plan clear enough to implement without ambiguity?
 - **Performance Hawk**: Scalability concerns in proposed approach
 - **QA Devil's Advocate**: Testability, missing acceptance criteria, gaps in test plan
+- **Codebase Conservator**: Does the plan follow existing project patterns? Will implementation create inconsistencies?
