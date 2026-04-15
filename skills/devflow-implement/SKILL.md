@@ -294,6 +294,18 @@ codex exec resume "$SESSION_ID" --full-auto \
 
 ---
 
+#### Rate-limit fallback (codex backend)
+
+If a codex command fails with "limit reached", "rate limit", or "quota exceeded"
+in its output or stderr:
+
+1. Check config for `codex.fallback_command` (default: `codex-local-proxy`)
+2. If set and command exists on `$PATH` → replace `codex` with fallback, retry once
+3. If fallback empty or not found → escalate to user
+4. Fallback starts a new session — update `$SESSION_FILE` with new session ID
+
+See `devflow-review/SKILL.md` Step 4 for full detection snippet.
+
 **Note on large diffs**: If the diff exceeds ~50KB, split the review by file groups.
 
 ### Step 6: Process Review Response
