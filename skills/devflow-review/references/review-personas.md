@@ -1,8 +1,9 @@
 # Review Personas
 
-Devflow supports **multi-persona review** — the external reviewer spawns parallel
-sub-agents, each examining the code from a distinct perspective. This catches
-issues that a single generalist review misses.
+Devflow supports **multi-persona review** — the host agent spawns internal sub-agents
+in parallel, each examining the code from a distinct perspective. This catches
+issues that a single generalist review misses. External review uses a single
+generalist prompt for independent second opinion.
 
 ## Personas
 
@@ -109,11 +110,14 @@ issues that a single generalist review misses.
 
 ---
 
-## Multi-Persona Review Prompt Template
+## Internal Sub-Agent Prompt Template
 
-Use this template when constructing the `REVIEW_PROMPT` for external tools.
-Replace `{{REVIEW_TARGET}}` with the actual content (diff, plan, etc.) and
-`{{REVIEW_FOCUS}}` with any user-specified focus area.
+This template is for **internal persona sub-agents only** — external review uses
+the short instruction-based generalist prompt defined in each SKILL.md.
+
+Use this template when constructing the prompt for each internal sub-agent.
+Replace `{{REVIEW_TARGET}}` with the review scope description (e.g., what git
+command to run) and `{{REVIEW_FOCUS}}` with any user-specified focus area.
 
 > **Note on personas**: If the user has disabled specific personas in
 > `config.yaml` → `review_personas.personas`, exclude them from the prompt.
@@ -163,8 +167,8 @@ End with: APPROVED (no critical/important issues) or CHANGES_REQUESTED
 
 ## Graceful Degradation
 
-If the external tool cannot spawn real sub-agents (older Codex, restricted Claude
-in plan mode), it should simulate the perspectives sequentially. The prompt is
+If the host agent cannot spawn real sub-agents (e.g., Windsurf, Gemini), it should
+simulate the perspectives sequentially. The prompt is
 designed to work in both modes — real parallel sub-agents or sequential simulation.
 
 After parsing the review response, check whether output contains per-persona
