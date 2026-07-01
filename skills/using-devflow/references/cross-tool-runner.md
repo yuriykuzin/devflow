@@ -64,7 +64,9 @@ devflow_cfg_files() {
 devflow_cfg_fingerprint() {
   local f m e out=""
   while IFS= read -r f; do
-    if [ -f "$f" ]; then e=1; m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)"; else e=0; m=0; fi
+    # GNU stat FIRST (`-c %Y`): on Linux `-f` means --file-system and would emit volatile
+    # filesystem stats into the fingerprint. On BSD/macOS `-c` errors, so fall back to `-f %m`.
+    if [ -f "$f" ]; then e=1; m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"; else e=0; m=0; fi
     out="$out$f|$e|$m;"
   done < <(devflow_cfg_files)
   printf '%s' "$out"

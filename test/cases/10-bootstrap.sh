@@ -24,6 +24,11 @@ hasnt "$DEVFLOW_PLAN_PATH" "docs/superpowers" "plan path avoids docs/superpowers
 # fingerprint recorded
 env_body="$(cat "$DEVFLOW_RUN_ENV")"
 has "$env_body" "DEVFLOW_CFG_FINGERPRINT=" "fingerprint frozen into run.env"
+
+# Fingerprint must be well-formed: single line of "path|exists|mtime;" with NUMERIC mtimes.
+# Catches the GNU `stat -f` regression (which leaks multi-line volatile filesystem stats).
+ok "printf '%s' \"\$DEVFLOW_CFG_FINGERPRINT\" | grep -Eq '^([^|]+\\|[01]\\|[0-9]+;)+\$'" \
+   "fingerprint is well-formed (numeric mtimes, no volatile stat garbage)"
 has "$env_body" "DEVFLOW_PLUGIN_DIR=" "plugin dir frozen into run.env"
 has "$env_body" "DEVFLOW_PROJECT_ROOT=" "project root frozen into run.env"
 
