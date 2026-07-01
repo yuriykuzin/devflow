@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Deterministic codex-CLI stub for the devflow test harness. No network, no token, no TTY.
+# Behaviour selected by FAKE_CODEX_MODE: ok (default) | ratelimit | auth | linger
+#   ok        -> emit thread_id + agent_message(APPROVED) + turn.completed, exit 0
+#   linger    -> like ok, then sleep (stays alive after completion -> exercises drain->kill)
+#   ratelimit -> "rate limit reached" to stderr, exit 1, no events
+#   auth      -> "not logged in" to stderr, exit 1, no events (empty events file)
+# Records each real invocation to $FAKE_CODEX_LOG (if set) as "MODE|resume=0/1".
+set -u
+joined=" $* "
+
+# Capability probe: `exec --help` must advertise --json (runner validates the binary this way).
+case "$joined" in
+  *" --help "*)
+    echo "Usage: codex exec [--json] [--full-auto] [--ephemeral] -m MODEL -o OUT PROMPT"
+    echo "      --json    emit JSONL events to stdout"
+    exit 0 ;;
+esac
+
+# Locate -o OUT (codex writes its last message there; for codex the runner reads events, not OUT).
+OUT=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && OUT="$a"
+  prev="$a"
+done
+
+is_resume=0
+case "$joined" in *" exec resume "*) is_resume=1 ;; esac
+
+MODE="${FAKE_CODEX_MODE:-ok}"
+[ -n "${FAKE_CODEX_LOG:-}" ] && printf '%s|resume=%s\n' "$MODE" "$is_resume" >> "$FAKE_CODEX_LOG"
+
+emit_ok() {
+  echo '{"type":"thread.started","thread_id":"thread_test_abc123"}'
+  echo '{"type":"item.completed","item":{"type":"agent_message","text":"Reviewed the change. No blocking issues found. APPROVED"}}'
+  echo '{"type":"turn.completed"}'
+  [ -n "$OUT" ] && printf 'APPROVED\n' > "$OUT"
+}
+
+case "$MODE" in
+  ok)        emit_ok ;;
+  linger)    emit_ok; sleep 30 ;;
+  ratelimit) echo "Error: rate limit reached, please retry later." >&2; exit 1 ;;
+  auth)      echo "Error: not logged in. Please run: codex login" >&2; exit 1 ;;
+  *)         echo "fake-codex: unknown FAKE_CODEX_MODE=$MODE" >&2; exit 2 ;;
+esac

@@ -37,15 +37,21 @@ claude:
 # Backend: codex (Codex CLI)
 # ──────────────────────────────────────────────────────────────
 codex:
+  # Absolute path to the Rust codex CLI. Empty = auto-resolve & validate: devflow picks
+  # the first candidate whose `exec --help` advertises `--json` (preferring Homebrew
+  # /opt/homebrew/bin/codex), detecting & skipping an NVM-shadowed old CLI that lacks
+  # --json and needs TTY auth. Set an absolute path to force a specific binary; devflow
+  # fails loudly if no candidate supports `exec --json`.
+  command_path: ""
   reviewer:
     command: "codex exec"
     flags: "--full-auto"
-    model: "gpt-5.4"
-    effort: "xhigh"                  # via -c 'model_reasoning_effort="..."'
+    model: "gpt-5.5"
+    effort: "high"                   # via -c 'model_reasoning_effort="..."'
   implementer:
     command: "codex exec"
     flags: "--full-auto"
-    model: "gpt-5.4"
+    model: "gpt-5.5"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   session_reuse: true
   # Rate-limit fallback: when codex hits "limit reached", retry with this
@@ -113,7 +119,7 @@ review_personas:
         model: "opus"
         effort: "max"
       codex:
-        effort: "xhigh"
+        effort: "high"
     standard:                         # thorough but less expensive
       personas: [qa, readability, performance, conservator]
       claude:

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Always-succeeds codex stub, used as a Section-D fallback_command target so a
+# rate-limited primary can be distinguished from a successful fallback retry.
+FAKE_CODEX_MODE=ok exec "$(dirname "$0")/fake-codex" "$@"

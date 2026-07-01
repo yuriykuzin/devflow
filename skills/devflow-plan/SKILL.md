@@ -52,34 +52,14 @@ digraph plan {
 
 ## Step-by-Step
 
-### Step 1: Read Config
+### Step 1: Bootstrap (config + personas + binary, once)
 
-Read devflow configuration. Check in order (later overrides earlier):
-1. Defaults (see `config.default.yaml`)
-2. Global: `~/.devflow/config.yaml`
-3. Project: `.devflow.yaml` in project root
-
-```bash
-# Check for configs
-cat ~/.devflow/config.yaml 2>/dev/null || echo "No global config"
-cat .devflow.yaml 2>/dev/null || echo "No project config"
-```
-
-**Resolve the active backend** from the `backend` key (default: `claude`), then read
-settings from the matching section:
-
-- `backend`: `claude` or `codex`
-- `<backend>.reviewer.command`
-- `<backend>.reviewer.flags`
-- `<backend>.reviewer.model`
-- `<backend>.reviewer.effort`
-- `<backend>.implementer.command`
-- `<backend>.implementer.flags`
-- `<backend>.implementer.model`
-- `<backend>.implementer.effort`
-- `<backend>.session_reuse`
-
-For example, if `backend: claude`, read `claude.reviewer.command`, etc.
+Run **Section A** of `skills/using-devflow/references/cross-tool-runner.md`. It resolves
+the active backend, reviewer/implementer model+effort, `session_reuse`,
+`fallback_command`, `output_dir`, personas, the validated codex binary, and the
+canonical `$DEVFLOW_PLAN_PATH` ONCE, freezing them into a per-run `run.env` (sourced for
+the rest of this skill). Reused if valid for this project, else re-bootstrapped — no
+per-phase YAML re-reads.
 
 ### Step 2: Internal Planning (superpowers)
 
@@ -90,15 +70,28 @@ Invoke superpowers skills for the internal planning process:
 
 These skills handle the full internal planning workflow including spec review loops.
 
-After these complete, you should have a plan file (typically at `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`).
+After these complete, superpowers writes a plan file (typically under
+`docs/superpowers/plans/...`). **Move/copy it to the canonical devflow location**
+`$DEVFLOW_PLAN_PATH` (from `run.env` — under `output_dir`, e.g.
+`docs/devflow/reports/plans/YYYY-MM-DD-<feature>.md`) and use `$DEVFLOW_PLAN_PATH` for
+all later references (review scope, implementation input, final report). This keeps
+devflow-authored artifacts out of `docs/superpowers/`.
+
+```bash
+mkdir -p "$(dirname "$DEVFLOW_PLAN_PATH")"
+SP_PLAN="<superpowers-plan-path>"
+# Move; on cross-device failure, copy then remove the source so nothing is left under docs/superpowers.
+mv "$SP_PLAN" "$DEVFLOW_PLAN_PATH" 2>/dev/null || { cp "$SP_PLAN" "$DEVFLOW_PLAN_PATH" && rm -f "$SP_PLAN"; }
+```
 
 ### Step 3: Internal + External Plan Review (parallel)
 
 Launch both simultaneously. Two axes of diversity: **personas × tools**.
 
 **Internal review** (multi-persona, background sub-agents):
-Read persona definitions from `skills/devflow-review/references/review-personas.md`
-(see "Plan Review Variant" for plan-specific lenses). For each enabled persona,
+Read persona definitions from `$PERSONAS_REF` (cached by Section A; falls back to
+`skills/devflow-review/references/review-personas.md`) — see "Plan Review Variant" for
+plan-specific lenses. For each enabled persona,
 use the Agent tool to spawn a background sub-agent. Pass it:
 - The persona's review lens (from review-personas.md, plan-review variant)
 - The review target scope (what git command to run, or what files to read)
@@ -129,7 +122,7 @@ plan content into the prompt, let the tool read it directly.
 ```
 REVIEW_PROMPT="You are reviewing an implementation plan. READ-ONLY — do not modify files.
 
-Read the plan file at: <plan-file-path>
+Read the plan file at: $DEVFLOW_PLAN_PATH
 Read any project files you need for context.
 
 Review for:
@@ -143,91 +136,21 @@ For each issue: severity (critical/important/minor), description, fix.
 Respond: APPROVED or ISSUES"
 ```
 
-Common variables:
-```bash
-SESSION_FILE="/tmp/devflow-plan-review.session"
-OUTPUT_FILE="/tmp/devflow-plan-review-output.txt"
-```
+#### Run the call (both backends)
 
----
+Run the plan review via `skills/using-devflow/references/cross-tool-runner.md`:
 
-#### Backend: claude
+- **Scope** — build the SCOPE block with **Section C**, `SCOPE_MODE=plan` (the reviewer
+  reads `$DEVFLOW_PLAN_PATH` read-only + context files).
+- **Invocation** — **Section B** with `PHASE=plan-review`, reviewer model/effort from
+  `run.env`. First iteration = fresh session captured to `$PLAN_SESSION_FILE`; later
+  iterations = resume it ("re-review: read the plan again"). The resumed session keeps
+  full context (~20k tokens saved/iteration) and carries into Phase 2 implementation.
+- **Fallback** — **Section D** (rate-limit → one proxy retry, new session id;
+  auth/capability failure → escalate). If `session_reuse` is false, skip session capture
+  (`--ephemeral` for codex, `--no-session-persistence` for claude).
 
-**First iteration — new session:**
-```bash
-claude -p --output-format json --permission-mode plan \
-  --model <reviewer.model> --effort <reviewer.effort> \
-  "$REVIEW_PROMPT" | tee "$OUTPUT_FILE"
-
-# Capture session ID
-jq -r '.session_id' "$OUTPUT_FILE" > "$SESSION_FILE"
-```
-
-**Subsequent iterations — resume session:**
-```bash
-SESSION_ID=$(cat "$SESSION_FILE")
-claude -p --output-format json --permission-mode plan \
-  --model <reviewer.model> --effort <reviewer.effort> \
-  --resume "$SESSION_ID" \
-  "Issues were fixed. Re-review: read the plan file again to see current state."
-```
-
-**Parse result:**
-```bash
-jq -r '.result' /tmp/devflow-plan-review-output.txt
-```
-
----
-
-#### Backend: codex
-
-> **WARNING**: Codex CLI has NO `--effort` flag. Reasoning effort is set via
-> `-c 'model_reasoning_effort="..."'` (a config override), NOT a direct flag.
-> **CRITICAL**: All `-c` flags MUST go BEFORE the `exec` subcommand. Placing
-> them after `exec` creates a fresh config context that shadows top-level
-> `-c` flags (e.g., from `codex-local-proxy`), causing codex to fall back to
-> its default provider.
-
-**First iteration — new session:**
-```bash
-EVENTS_FILE="/tmp/devflow-plan-review-events.jsonl"
-
-codex -c 'model_reasoning_effort="<reviewer.effort>"' \
-  exec --full-auto --json -m <reviewer.model> \
-  -o "$OUTPUT_FILE" \
-  "$REVIEW_PROMPT" 2>/dev/null | tee "$EVENTS_FILE"
-
-# Capture session ID
-head -1 "$EVENTS_FILE" | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['thread_id'])" > "$SESSION_FILE"
-```
-
-**Subsequent iterations — resume session:**
-```bash
-SESSION_ID=$(cat "$SESSION_FILE")
-codex exec resume "$SESSION_ID" --full-auto \
-  -o "$OUTPUT_FILE" \
-  "Issues were fixed. Re-review: read the plan file again to see current state."
-```
-
----
-
-The resumed session preserves full context — the reviewer already knows the plan
-structure and prior feedback, saving ~20k tokens per iteration.
-
-**If session_reuse is false**: for codex use `--ephemeral`; for claude use
-`--no-session-persistence`. Skip session capture in both cases.
-
-#### Rate-limit fallback (codex backend)
-
-If a codex command fails with "limit reached", "rate limit", or "quota exceeded"
-in its output or stderr:
-
-1. Check config for `codex.fallback_command` (default: `codex-local-proxy`)
-2. If set and command exists on `$PATH` → replace `codex` with fallback, retry once
-3. If fallback empty or not found → escalate to user
-4. Fallback starts a new session — update `$SESSION_FILE` with new session ID
-
-See `devflow-review/SKILL.md` Step 4 for full detection snippet.
+Verdict = last `agent_message` from Section B (`APPROVED` / `ISSUES`).
 
 ### Step 4: Process Review Response
 
@@ -243,27 +166,12 @@ Parse the external reviewer's response:
 
 ### Step 5: Implementation Handoff (optional)
 
-If the plan is approved and implementation follows (e.g., in `devflow:run`):
-
-**claude backend:**
-```bash
-SESSION_ID=$(cat /tmp/devflow-plan-review.session)
-claude -p --output-format json --permission-mode default \
-  --model <implementer.model> --effort <implementer.effort> \
-  --resume "$SESSION_ID" \
-  "Implement the plan you just reviewed. The plan is approved. Create the files."
-```
-
-**codex backend:**
-```bash
-SESSION_ID=$(cat /tmp/devflow-plan-review.session)
-codex -c 'model_reasoning_effort="<implementer.effort>"' \
-  exec resume "$SESSION_ID" --full-auto -m <implementer.model> \
-  -o /tmp/devflow-impl-output.txt \
-  "Implement the plan you just reviewed. The plan is approved. Create the files."
-```
-
-This gives the implementer full context of the plan AND all review feedback.
+If the plan is approved and implementation follows (e.g., in `devflow:run`): resume
+`$PLAN_SESSION_FILE` with **implementer** settings via cross-tool-runner.md **Section B**
+(swap `REVIEWER_*` → `IMPLEMENTER_*`, set `PERMISSION_MODE=default` for the claude
+backend), prompt `"Implement the plan you just reviewed. The
+plan is approved. Create the files."` This gives the implementer full context of the plan
+AND all review feedback. Section D fallback applies.
 
 ### Step 6: Finalize
 

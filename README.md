@@ -102,7 +102,7 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 - **Shared config**: `~/.devflow/config.yaml` is read by all agents
 - **Symlinks everywhere**: Codex (`~/.agents/skills/devflow`) and Windsurf (`workflows/devflow-*.md`) both point back to the repo
 - **Direct reads**: Claude Code, Cursor, and Gemini read from the repo directory
-- **Session files**: stored in `/tmp/devflow-*.session` — any agent can resume another's Codex session
+- **Session files**: stored under a per-run dir `/tmp/devflow-run.XXXXXX/` (namespaced so concurrent runs in different repos don't collide); `/tmp/devflow-last-run` points at the latest
 - **Per-project overrides**: `.devflow.yaml` in project root overrides global config
 
 ## Configuration
@@ -118,7 +118,7 @@ To switch between Claude Code and Codex as the external reviewer/implementer, ch
 # Use Claude Code (opus for reviews, sonnet for implementation)
 backend: claude
 
-# Use Codex CLI (gpt-5.4 for both)
+# Use Codex CLI (gpt-5.5 for both)
 backend: codex
 ```
 
@@ -148,16 +148,19 @@ claude:
   session_reuse: true
 
 codex:
+  command_path: ""         # "" = auto-resolve & validate (exec --json), prefer Homebrew,
+                           # skip NVM-shadowed old CLI; set absolute path to force
   reviewer:
     command: "codex exec"
     flags: "--full-auto"
-    model: "gpt-5.4"
-    effort: "xhigh"        # via -c 'model_reasoning_effort="..."'
+    model: "gpt-5.5"
+    effort: "high"         # via -c 'model_reasoning_effort="..."'
   implementer:
     command: "codex exec"
     flags: "--full-auto"
-    model: "gpt-5.4"
+    model: "gpt-5.5"
     effort: "high"
+  fallback_command: "codex-local-proxy"   # rate-limit fallback; "" to disable
   session_reuse: true
 
 autonomy: attended         # attended | unattended
@@ -168,8 +171,8 @@ output_dir: "docs/devflow/reports"
 
 | Role | claude backend | codex backend | Purpose |
 |------|---------------|---------------|----------|
-| Reviewer | opus / max | gpt-5.4 / xhigh | Thorough plan and code reviews |
-| Implementer | sonnet / high | gpt-5.4 / high | Fast, capable code generation |
+| Reviewer | opus / max | gpt-5.5 / high | Thorough plan and code reviews |
+| Implementer | sonnet / high | gpt-5.5 / high | Fast, capable code generation |
 | Orchestrator | (host model) | (host model) | The agent running devflow (e.g., opus-4.6) |
 
 ### Session Reuse
@@ -181,7 +184,18 @@ When `<backend>.session_reuse: true`, devflow captures the session ID on the fir
 
 Session capture differs by backend:
 - **claude**: `jq -r '.session_id'` from `--output-format json`, resume with `--resume <id>`
-- **codex**: `thread_id` from `--json` JSONL, resume with `codex exec resume <id>`
+- **codex**: `thread_id` from `--json` JSONL, resume with `exec resume <id>` using the
+  same full flag shape as a fresh call (`-c model_reasoning_effort` before `exec`,
+  `--json`, `-m`)
+
+### External Calls Are Non-Blocking
+
+External reviews are launched in the background and polled via their event stream
+(adaptive backoff, ~8–10 min hard-cap), so they never die at a host's command timeout.
+The codex binary is auto-resolved and validated (`exec --json` support; Homebrew
+preferred; NVM-shadowed CLIs skipped) — override with `codex.command_path`. Config,
+personas, and the binary are resolved **once per run** and frozen into a per-run env
+file. The canonical procedure lives in `skills/using-devflow/references/cross-tool-runner.md`.
 
 ## Skills
 
@@ -236,7 +250,7 @@ devflow/
 ├── .codex/INSTALL.md               # Agent-readable install instructions
 ├── skills/                         # Skill definitions (shared by all agents)
 │   ├── using-devflow/SKILL.md      # Entry point — skill discovery
-│   ├── using-devflow/references/   # Platform-specific tool mappings
+│   ├── using-devflow/references/   # Platform tool mappings + cross-tool-runner.md (canonical external-call procedure)
 │   ├── devflow-plan/SKILL.md       # Plan with cross-tool review
 │   ├── devflow-implement/SKILL.md  # Implement with cross-tool review
 │   ├── devflow-review/SKILL.md     # Standalone cross-tool review

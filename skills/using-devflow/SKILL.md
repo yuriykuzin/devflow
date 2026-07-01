@@ -47,41 +47,32 @@ See `config.default.yaml` for the full template.
 
 ## How Cross-Tool Calls Work
 
-Devflow calls external tools via their CLI in non-interactive mode.
-The exact syntax depends on the active `backend`:
-
-### Backend: claude (Claude Code CLI)
-
-```bash
-# First call — captures session ID from JSON output
-claude -p --output-format json --permission-mode plan \
-  --model opus --effort max \
-  "Review this plan: ..."
-
-# Resume session for subsequent iterations
-claude -p --output-format json --permission-mode plan \
-  --model opus --effort max \
-  --resume "$SESSION_ID" \
-  "Re-review: ..."
-
-# Parse result and session ID
-jq -r '.result' /tmp/review-output.txt
-jq -r '.session_id' /tmp/review-output.txt
-```
-
-### Backend: codex (Codex CLI)
+Devflow calls external tools via their CLI in non-interactive mode. The **canonical
+procedure** — config caching, binary resolution, async launch, polling, session capture,
+scope pinning, and rate-limit fallback — lives in
+[`references/cross-tool-runner.md`](references/cross-tool-runner.md). All devflow skills
+delegate the mechanics there; below is just the shape.
 
 ```bash
-# First call — captures session ID via --json JSONL events
-codex -c 'model_reasoning_effort="xhigh"' \
-  exec --full-auto --json -m gpt-5.4 \
-  -o /tmp/review-output.txt "Review this plan: ..." 2>/dev/null | tee /tmp/events.jsonl
-
-# Resume session
-codex exec resume "$SESSION_ID" --full-auto -o /tmp/review-output.txt "Re-review: ..."
+# codex — launched non-blocking (-c flags BEFORE exec; always < /dev/null), polled to completion
+nohup "$CODEX_BIN" -c "model_reasoning_effort=\"$REVIEWER_EFFORT\"" \
+  exec --full-auto --json -m "$REVIEWER_MODEL" -o "$OUT" \
+  "$PROMPT" < /dev/null > "$EVENTS" 2> "$STDERR" &
+# claude — claude -p --output-format json --permission-mode plan --model <m> --effort <e> "$PROMPT"
 ```
 
-The orchestrating agent (you) runs Bash to invoke the external tool, captures its output, and uses it to iterate.
+The orchestrating agent (you) launches the call in the background (Bash
+`run_in_background: true` on Claude Code, `nohup &` elsewhere), polls the event stream,
+and iterates. See the runner for the full async/poll/fallback logic — never hand-roll a
+one-off invocation.
+
+### Codex binary resolution
+
+`$CODEX_BIN` is resolved once during bootstrap (cross-tool-runner.md Section A): a bare
+`codex` can hit an NVM-shadowed old CLI lacking `--json`. Devflow picks the first
+candidate that passes `exec --help | grep --json` (preferring Homebrew
+`/opt/homebrew/bin/codex`), fails loudly if none qualify, and lets you force a path with
+`codex.command_path` in config. Always invoked with `< /dev/null` to avoid TTY blocks.
 
 ## Model Tiers
 
@@ -89,8 +80,8 @@ Devflow uses different model tiers for different tasks. Defaults depend on backe
 
 | Role | claude backend | codex backend | Purpose |
 |------|---------------|---------------|----------|
-| **Reviewer** | opus / max | gpt-5.4 / xhigh | Thorough plan and code reviews |
-| **Implementer** | sonnet / high | gpt-5.4 / high | Fast, capable code generation |
+| **Reviewer** | opus / max | gpt-5.5 / high | Thorough plan and code reviews |
+| **Implementer** | sonnet / high | gpt-5.5 / high | Fast, capable code generation |
 | **Orchestrator** | (your model) | (your model) | You — the host agent |
 
 Configured in `~/.devflow/config.yaml` under `<backend>.reviewer.*` and `<backend>.implementer.*`.
@@ -103,8 +94,10 @@ When `<backend>.session_reuse: true` (default), devflow:
    - **codex**: `thread_id` from `--json` JSONL first event
 2. Resumes the same session for subsequent iterations
    - **claude**: `--resume <session_id>`
-   - **codex**: `codex exec resume <session_id>`
-3. Passes sessions between phases (plan review → implementation review)
+   - **codex**: `exec resume <session_id>` with the **same full flag shape** as a fresh
+     call (`-c model_reasoning_effort` before `exec`, `--json`, `-m`, `< /dev/null`) —
+     see cross-tool-runner.md Section B
+3. Passes sessions between phases (plan review → implementation review) via the shared `run.env`
 
 This saves ~20k tokens per resumed call.
 

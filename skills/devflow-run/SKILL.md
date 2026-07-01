@@ -93,18 +93,14 @@ digraph run {
    - "don't ask me" / "--unattended" → `unattended`
    - Default → `attended`
 
-**Read config:**
-```bash
-cat ~/.devflow/config.yaml 2>/dev/null || echo "Using defaults"
-cat .devflow.yaml 2>/dev/null || echo "No project override"
-```
-
-**Resolve the active backend** from the `backend` key (default: `claude`), then read
-settings from the matching section (`claude.*` or `codex.*`):
-- **Reviewer**: `<backend>.reviewer.model` + `<backend>.reviewer.effort`
-- **Implementer**: `<backend>.implementer.model` + `<backend>.implementer.effort`
-- **Orchestrator** (you): uses its own model (e.g., `opus-4.6` in Windsurf, whatever the host agent runs)
-- **Session reuse**: `<backend>.session_reuse` (default: `true`)
+**Bootstrap once:** run **Section A** of
+`skills/using-devflow/references/cross-tool-runner.md`. This creates the shared per-run
+`RUN_DIR`, resolves config (backend, reviewer/implementer model+effort, `session_reuse`,
+`fallback_command`, `output_dir`), caches personas, validates the codex binary, and
+computes `$DEVFLOW_PLAN_PATH` — frozen into `run.env` and exported as `DEVFLOW_RUN_ENV`.
+Phases 1–3 inherit this env and `source` it; they do NOT re-read config/personas or
+re-resolve codex.
+- **Orchestrator** (you): uses its own model (e.g., `opus-4.6` in Windsurf, whatever the host agent runs).
 
 **Create a TodoWrite/todo_list with phases to track progress.**
 
@@ -115,9 +111,10 @@ settings from the matching section (`claude.*` or `codex.*`):
 - External cross-tool review of the plan
 - Iteration until plan is approved
 
-**Output**: Plan file path (e.g., `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`)
+**Output**: Plan file at the canonical `$DEVFLOW_PLAN_PATH` (under `output_dir`, not `docs/superpowers/`).
 
-**Session artifact**: After plan review completes, a session file exists at `/tmp/devflow-plan-review.session`. This carries context to Phase 2.
+**Session artifact**: After plan review completes, the session file is at
+`$PLAN_SESSION_FILE` (under `$RUN_DIR`, from `run.env`). This carries context to Phase 2.
 
 **In attended mode**: After plan is finalized, present summary to user:
 > "Phase 1 complete. Plan saved to `<path>`. External review: APPROVED after N iterations. Proceed to implementation?"
@@ -133,7 +130,7 @@ settings from the matching section (`claude.*` or `codex.*`):
 
 **Input**: Plan file from Phase 1 (or user-provided path)
 
-**Session continuity**: `devflow:implement` automatically checks for `/tmp/devflow-plan-review.session` and resumes that session for code review — the reviewer already knows the plan and prior feedback.
+**Session continuity**: `devflow:implement` resumes `$PLAN_SESSION_FILE` (inherited via the shared `run.env`) for code review — the reviewer already knows the plan and prior feedback.
 
 **Output**: Code changes in working directory + review report
 
@@ -216,7 +213,7 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 |-------|--------|
 | External tool CLI not found | Tell user to install it, suggest config change |
 | External tool returns error | Retry once, then show error to user |
-| External tool timeout | Default 5 min timeout, retry once |
+| External tool timeout | ~8–10 min hard-cap (cross-tool-runner.md Section B) → kill, surface last event, escalate |
 | Plan file not found (Phase 2) | Ask user for path |
 | Config file invalid YAML | Use defaults, warn user |
 | Superpowers not installed | Tell user to install superpowers first |
@@ -229,5 +226,7 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 - **Don't auto-commit** — changes stay in working directory
 - **Report everything** — save reports for audit trail
 - **Superpowers skills do the heavy lifting** — devflow orchestrates between tools
-- **Model tiers matter** — `xhigh` for reviews (thorough), `high` for implementation (fast)
+- **Model tiers matter** — reviewer effort ≥ implementer (claude: `max` review / `high` impl; codex: `high` for both)
+- **Config + personas + codex binary resolved once** in Step 0 (`run.env` under a per-run `RUN_DIR`); phases source it, never re-read
+- **External calls are non-blocking** — launched in background and polled (cross-tool-runner.md Section B); no 2-min-timeout deaths
 - **Session reuse saves tokens** — ~20k tokens saved per resumed iteration
