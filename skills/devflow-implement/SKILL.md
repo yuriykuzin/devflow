@@ -162,7 +162,7 @@ The external reviewer runs in the repo with full tool access. Instead of stuffin
 diffs and plan content into prompt variables, let the tool explore the repo itself.
 
 ```
-REVIEW_PROMPT="You are reviewing a code implementation against its plan. READ-ONLY — do not modify files.
+REVIEW_PROMPT="You are reviewing a code implementation against its plan. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file and run read-only verification (tests, linters, type-checkers, builds in check mode) to ground your findings; do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
 
 Read the plan at: $DEVFLOW_PLAN_PATH
 Then run git commands to see the implementation changes (git diff, git show, etc.).

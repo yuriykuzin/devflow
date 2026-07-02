@@ -146,9 +146,9 @@ re-resolve codex.
 - External cross-tool review
 - Combined report
 
-**This is the final quality gate.** If critical issues are found:
+**This is the final quality gate.** On a CHANGES_REQUESTED verdict:
 - **attended**: Present to user for decision
-- **unattended**: Attempt to fix and re-review, iterating until APPROVED (no fixed cap). If the same blocking issues recur with no progress, stop, record the unresolved issues in the final report, and mark the phase CHANGES_REQUESTED — there is no user to prompt in this mode, so do not loop indefinitely
+- **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review loop and the APPROVED-closure rules (external re-review by default; a narrow verified-fixed fallback only when the session is unreachable *and* every finding is mechanically verifiable; an internal-only re-review never counts). It iterates without a fixed cap and, if blocked with no progress, records the unresolved issues and leaves the phase CHANGES_REQUESTED — it will not loop indefinitely. Do not restate or override those rules here.
 
 ### Step 4: Final Report
 

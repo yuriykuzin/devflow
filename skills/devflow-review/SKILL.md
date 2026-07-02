@@ -104,7 +104,7 @@ The external reviewer always gets the **single generalist prompt** (not multi-pe
 This keeps external calls fast and cheap while internal sub-agents provide persona diversity.
 
 ```
-REVIEW_PROMPT="You are performing a code review of this repository. READ-ONLY — do not modify files.
+REVIEW_PROMPT="You are performing a code review of this repository. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file and run read-only verification (tests, linters, type-checkers, builds in check mode) to ground your findings; do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
 
 SCOPE: <built via cross-tool-runner.md Section C from the scope mode in the table above — explicit DIFF_CMD + in-scope file list; reviewer reviews ONLY that changeset>
 
@@ -199,10 +199,48 @@ Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`.
 
 ## Iteration (if CHANGES_REQUESTED)
 
-If user asks to fix and re-review:
+**attended** — if the user asks to fix and re-review:
 1. Fix the critical/important issues
 2. Re-run Step 4 with the updated diff (resume existing session)
-3. Repeat until APPROVED — no fixed cap. (Attended mode: if the same blocking issues recur with no progress, surface them to the user instead of looping.)
+3. Repeat until APPROVED — no fixed cap. If the same blocking issues recur with no progress, surface them to the user instead of looping.
+
+**unattended** (e.g. Phase 3 of `devflow:run --unattended`) — no user to ask, but the APPROVED
+gate still stands. After fixing every CHANGES_REQUESTED finding:
+
+1. **Attempt external re-review first — always.** Resume the external session (Step 4, `RESUME_ID`
+   from `$SESSION_FILE`) and re-run until it returns APPROVED. Same no-fixed-cap /
+   stop-on-no-progress rule as attended: if the same blocking issues recur, record the unresolved
+   issues and leave the phase CHANGES_REQUESTED.
+2. **Verified-fixed without external re-review** — a fallback available ONLY when the external
+   session is genuinely unreachable **and** every finding is mechanically verifiable:
+   - **Unreachable** — one of the following, with the stated proof recorded (you may not declare
+     unreachable without one of these):
+     - The resume attempt in step 1 actually ran and its Section D handler (`devflow_after_call`)
+       returned non-zero via any escalate path — rate-limit-after-fallback, auth/capability,
+       timeout (124), or unknown. **Proof:** the Section D stderr line. A lone timeout is often
+       transient — retry once before treating it as unreachable.
+     - No session id was ever captured, so resume is impossible (`[ ! -s "$SESSION_FILE" ]`) —
+       valid ONLY when the runner's `no session id captured` WARN was actually emitted on the
+       preceding external call. **Proof:** that WARN line. A `$SESSION_FILE` that held an id on an
+       earlier round and is now empty is a bug, not an unreachable session — escalate, do not
+       self-certify.
+   - **Mechanically verifiable** — every fixed finding maps to a specific deterministic check (a
+     named failing test, a compiler/type-checker error, a linter rule, or an exact
+     catalog/reference mismatch) that fully covers the original finding. A test finding counts as
+     mechanical ONLY when the original finding named a specific failing assertion; "insufficient /
+     missing coverage" is test *adequacy* → judgment (see below), not mechanical. Run those exact
+     checks; if all pass, record `verified-fixed without external re-review` in the report, each
+     finding paired with its command and output.
+   - **Any judgment finding disqualifies this path.** If even one open finding is a subjective
+     call (readability, architecture, API/naming design, security reasoning, or test *adequacy*
+     as opposed to test pass/fail), the mechanical path is forbidden. With the session
+     unreachable and a non-mechanical finding open, the phase stays CHANGES_REQUESTED — record
+     the unresolved issues. Never fake APPROVED.
+
+> **An internal-only re-review NEVER satisfies the APPROVED gate.** Your own re-read, or internal
+> persona sub-agents, cannot flip CHANGES_REQUESTED → APPROVED — the orchestrator may not vouch
+> for its own fix. APPROVED requires a fresh **external** verdict, or a passing **mechanical**
+> verification recorded as above.
 
 **Implementation handoff**: If fixes are complex, resume the review session with
 **implementer** settings via cross-tool-runner.md **Section B** (resume `$SESSION_FILE`,
@@ -215,6 +253,7 @@ Section D fallback applies here too.
 
 - **Internal = multi-persona, External = single generalist** — personas × tools, two axes of diversity
 - **Internal + external in parallel** — both are independent reads, synthesize after both complete
+- **APPROVED needs an external verdict or recorded mechanical verification** — never an internal-only re-read (see Iteration). This skill owns the APPROVED-closure rule; other skills point here.
 - **Respect persona tiers** — `deep` personas (Security, Architect) get opus/max; `standard` get sonnet/max
 - **Never blindly accept external review** — cross-reference with your own analysis
 - **False positives are normal** — external tool lacks full project context, explain disagreements

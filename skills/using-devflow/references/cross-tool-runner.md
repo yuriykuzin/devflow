@@ -322,7 +322,8 @@ devflow_run_external() {
     wait "$CODEX_PID" 2>/dev/null; CODEX_EXIT=$?
   fi
 
-  # Extract the verdict text + session id.
+  # Extract the verdict text + session id. The session id is REQUIRED, not optional
+  # bookkeeping — it is the minimum needed for resume-based iteration (see callout below).
   if [ "$BACKEND" = "codex" ]; then
     CALL_RESULT="$(python3 - "$EVENTS" <<'PY'
 import sys, json
@@ -353,6 +354,20 @@ PY
   return "$CODEX_EXIT"
 }
 ```
+
+> **Session capture is mandatory.** The `SESSION_ID` → `$SESSION_FILE` write is the
+> *minimum-viable* tail of every external call, never optional bookkeeping. If you hand-roll a
+> shorter `codex exec` / `claude -p` call instead of using this function, you MUST still capture
+> the session id into `$PHASE.session`:
+> - codex: `grep -o '"thread_id":"[^"]*"' "$EVENTS" | head -1 | cut -d'"' -f4`
+>   — the first `thread_id` occurrence in the event stream (not necessarily line 1)
+> - claude: `jq -r '.session_id // empty' "$OUT"`
+>
+> Without it there is no `RESUME_ID` next round, so the fix → re-review loop degrades to a fresh,
+> context-less review — and in unattended mode a missing session counts as "external session
+> unreachable", narrowing how the phase may reach APPROVED (devflow-review **Iteration** owns that
+> rule). Capture it even when the current call looks like the last one: you cannot know in advance
+> whether a re-review round will be needed.
 
 **Claude Code platform note:** on Claude Code prefer the Bash tool's
 `run_in_background: true` + the `BashOutput` tool over the in-script `sleep` poll — same

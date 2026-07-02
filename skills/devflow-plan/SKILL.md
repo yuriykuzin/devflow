@@ -115,7 +115,7 @@ The external reviewer runs in the repo with full tool access. Instead of stuffin
 plan content into the prompt, let the tool read it directly.
 
 ```
-REVIEW_PROMPT="You are reviewing an implementation plan. READ-ONLY — do not modify files.
+REVIEW_PROMPT="You are reviewing an implementation plan. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file for context and run read-only checks (e.g. linters on referenced code); do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
 
 Read the plan file at: $DEVFLOW_PLAN_PATH
 Read any project files you need for context.
