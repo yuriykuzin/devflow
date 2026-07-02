@@ -21,4 +21,11 @@ ok(){   # ok "SHELL-EXPR" LABEL   (expr already expanded by caller)
   if eval "$1" >/dev/null 2>&1; then _pass "$2"; else _fail "$2 [$1]"; fi
 }
 
-report(){ echo "  -- $T_PASS passed, $T_FAIL failed --"; [ "$T_FAIL" -eq 0 ]; }
+report(){
+  # A case that reaches report() having run ZERO assertions is a failure, not a pass —
+  # otherwise a body that silently short-circuits would go green while testing nothing.
+  if [ "$((T_PASS + T_FAIL))" -eq 0 ]; then
+    echo "  -- 0 passed, 0 failed -- FAIL: case ran no assertions"; return 1
+  fi
+  echo "  -- $T_PASS passed, $T_FAIL failed --"; [ "$T_FAIL" -eq 0 ]
+}

@@ -11,6 +11,8 @@ backend: claude              # codex | claude
 # Backend: claude (Claude Code CLI)
 # ──────────────────────────────────────────────────────────────
 claude:
+  # `command`/`flags` below are illustrative — they document the invocation devflow builds
+  # internally (see skills/using-devflow/references/cross-tool-runner.md), not live knobs.
   reviewer:
     command: "claude"
     flags: "-p --output-format json --permission-mode plan"
@@ -43,6 +45,8 @@ codex:
   # --json and needs TTY auth. Set an absolute path to force a specific binary; devflow
   # fails loudly if no candidate supports `exec --json`.
   command_path: ""
+  # `command`/`flags` below are illustrative — they document the invocation devflow builds
+  # internally (see skills/using-devflow/references/cross-tool-runner.md), not live knobs.
   reviewer:
     command: "codex exec"
     flags: "--full-auto"
@@ -79,9 +83,6 @@ autonomy: attended
 
 # Where to save reports and artifacts
 output_dir: "docs/devflow/reports"
-
-# Maximum review iterations before escalating to user
-max_review_iterations: 7
 
 # ──────────────────────────────────────────────────────────────
 # Multi-persona review

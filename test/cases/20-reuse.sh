@@ -15,13 +15,22 @@ REUSE=""
 isnt "$REUSE" "" "valid exported env is reused"
 is "$RUN_DIR" "$RUN_DIR1" "reuse keeps the same RUN_DIR (no fresh mktemp)"
 
-# (2) Change a tracked config file's mtime -> fingerprint mismatch -> env invalid.
+# (2) Reaped RUN_DIR: run.env lives INSIDE RUN_DIR, so a reaped tmp dir takes the env file with it
+#     and reuse must fall back to a fresh bootstrap. Delete the dir (run.env included), confirm the
+#     env no longer validates, then restore it so the checks below start from a clean baseline.
+cp "$ENV1" "$SB/saved-run.env"
+rm -rf "$RUN_DIR1"
+if devflow_env_valid "$ENV1"; then rc=0; else rc=1; fi
+is "$rc" "1" "reaped RUN_DIR invalidates the env (run.env gone with it -> re-bootstrap)"
+mkdir -p "$RUN_DIR1"; cp "$SB/saved-run.env" "$ENV1"
+
+# (3) Change a tracked config file's mtime -> fingerprint mismatch -> env invalid.
 touch -t 210012312359.59 "$REPO_FX/.devflow.yaml"
 REUSE=""
 . "$EXTRACTED/a2.sh"
 is "$REUSE" "" "changed config invalidates the env (fingerprint mismatch)"
 
-# (3) Foreign env (different project root + plugin) must not validate.
+# (4) Foreign env (different project root + plugin) must not validate.
 foreign="$SB/foreign.env"
 {
   echo "DEVFLOW_PROJECT_ROOT=/nowhere/else"

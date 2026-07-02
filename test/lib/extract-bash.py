@@ -34,7 +34,13 @@ def main():
             if line.strip() == '```':
                 inblock = False
                 if cur:
-                    blocks.setdefault(cur, []).append('\n'.join(buf))
+                    if cur in blocks:
+                        print("ERROR: section '%s' has more than one ```bash block; the extractor "
+                              "expects exactly one per mapped section, so a stray illustrative block "
+                              "would be sourced as runner code. Move it under an unmapped heading, or "
+                              "merge it into the section block." % cur, file=sys.stderr)
+                        sys.exit(1)
+                    blocks[cur] = ['\n'.join(buf)]
             else:
                 buf.append(line)
             continue

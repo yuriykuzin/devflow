@@ -124,8 +124,7 @@ Resuming saves ~20k tokens per iteration (preserves full context).
 ## Phase 4 — Process Review & Iterate
 
 - **APPROVED** → proceed to Phase 5
-- **ISSUES found** → fix issues in the plan, re-run Phase 3 (resume session). Max 5 iterations.
-- **Max iterations reached** → present remaining issues to user for decision.
+- **ISSUES found** → fix issues in the plan, re-run Phase 3 (resume session). Iterate until APPROVED — no fixed cap. If the same blocking issues recur with no progress, present them to the user for decision instead of looping.
 
 ---
 

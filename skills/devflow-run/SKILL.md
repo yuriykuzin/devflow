@@ -27,11 +27,11 @@ Full development pipeline that orchestrates planning, implementation, and review
 ```dot
 digraph run {
     rankdir=TB;
-    
+
     "Parse user request" [shape=box];
     "Read devflow config" [shape=box];
     "Determine scope" [shape=diamond];
-    
+
     subgraph cluster_phase1 {
         label="Phase 1: PLAN";
         style=filled;
@@ -39,7 +39,7 @@ digraph run {
         "Invoke devflow:plan skill" [shape=box];
         "Plan approved?" [shape=diamond];
     }
-    
+
     subgraph cluster_phase2 {
         label="Phase 2: IMPLEMENT";
         style=filled;
@@ -47,7 +47,7 @@ digraph run {
         "Invoke devflow:implement skill" [shape=box];
         "Implementation approved?" [shape=diamond];
     }
-    
+
     subgraph cluster_phase3 {
         label="Phase 3: FINAL REVIEW";
         style=filled;
@@ -55,10 +55,10 @@ digraph run {
         "Invoke devflow:review skill" [shape=box];
         "Review passed?" [shape=diamond];
     }
-    
+
     "Generate final report" [shape=box];
     "Done" [shape=doublecircle];
-    
+
     "Parse user request" -> "Read devflow config";
     "Read devflow config" -> "Determine scope";
     "Determine scope" -> "Invoke devflow:plan skill" [label="full or plan-only"];
@@ -148,7 +148,7 @@ re-resolve codex.
 
 **This is the final quality gate.** If critical issues are found:
 - **attended**: Present to user for decision
-- **unattended**: Attempt to fix and re-review (max 2 additional iterations)
+- **unattended**: Attempt to fix and re-review, iterating until APPROVED (no fixed cap). If the same blocking issues recur with no progress, stop, record the unresolved issues in the final report, and mark the phase CHANGES_REQUESTED — there is no user to prompt in this mode, so do not loop indefinitely
 
 ### Step 4: Final Report
 
@@ -163,19 +163,19 @@ Generate a comprehensive report summarizing the entire pipeline:
 **External reviewer**: <tool name>
 
 ## Phase 1: Planning
-- **Status**: ✅ Complete
+- **Status**: Complete
 - **Plan**: `<path>`
 - **Review iterations**: N
 - **Duration**: ~Xm
 
-## Phase 2: Implementation  
-- **Status**: ✅ Complete
+## Phase 2: Implementation
+- **Status**: Complete
 - **Files changed**: N
 - **Review iterations**: N
 - **Duration**: ~Xm
 
 ## Phase 3: Final Review
-- **Status**: ✅ Approved / ⚠️ Approved with notes
+- **Status**: Approved / Approved with notes
 - **Critical issues**: 0
 - **Important issues**: N (resolved)
 - **Report**: `<path>`

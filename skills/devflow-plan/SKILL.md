@@ -31,8 +31,6 @@ digraph plan {
     "Parse reviewer response" [shape=box];
     "Issues found?" [shape=diamond];
     "Address issues in plan" [shape=box];
-    "Max iterations reached?" [shape=diamond];
-    "Escalate to user" [shape=box];
     "Plan finalized" [shape=doublecircle];
 
     "Read devflow config" -> "Invoke superpowers:brainstorming";
@@ -42,10 +40,7 @@ digraph plan {
     "Call external reviewer via CLI" -> "Parse reviewer response";
     "Parse reviewer response" -> "Issues found?";
     "Issues found?" -> "Address issues in plan" [label="yes"];
-    "Address issues in plan" -> "Max iterations reached?";
-    "Max iterations reached?" -> "Escalate to user" [label="yes"];
-    "Max iterations reached?" -> "Call external reviewer via CLI" [label="no"];
-    "Escalate to user" -> "Plan finalized";
+    "Address issues in plan" -> "Call external reviewer via CLI" [label="re-review"];
     "Issues found?" -> "Plan finalized" [label="no — approved"];
 }
 ```
@@ -162,7 +157,7 @@ Parse the external reviewer's response:
   - For each **important** issue: fix it or explain why it's a false positive
   - For each **minor** issue: note it, fix if easy
   - After fixes, go back to Step 3 (re-review)
-  - **Max iterations**: 7 (from config `max_review_iterations`). If reached without approval, escalate to the user — present all remaining issues and ask what actions to take.
+  - **Iterate until APPROVED** — no fixed cap. Re-review after each round of fixes; the scope-pinned resumed session keeps every iteration cheap. (Attended mode: if the review is stuck — the same blocking issues recurring with no progress — surface the remaining issues to the user instead of looping.)
 
 ### Step 5: Implementation Handoff (optional)
 

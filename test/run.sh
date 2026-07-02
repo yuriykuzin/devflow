@@ -36,10 +36,21 @@ for c in "$HERE"/cases/*.sh; do
   matches "$base" || continue
   total_c=$((total_c+1))
   echo "== $base =="
-  bash "$c"; rc=$?
-  [ "$rc" -ne 0 ] && { fail=1; echo "   ($base FAILED, rc=$rc)"; }
+  out="$(bash "$c" 2>&1)"; rc=$?
+  printf '%s\n' "$out"
+  if [ "$rc" -ne 0 ]; then
+    fail=1; echo "   ($base FAILED, rc=$rc)"
+  elif ! printf '%s\n' "$out" | grep -Eq -- '-- [0-9]+ passed, [0-9]+ failed --'; then
+    # No report() line means the case aborted before asserting anything — treat as failure,
+    # not a silent pass (guards against a body that returns/exits 0 without running tests).
+    fail=1; echo "   ($base FAILED — never reached report(); no assertions ran)"
+  fi
 done
 
 echo
+if [ "$total_c" -eq 0 ]; then
+  # A filter that matches no case files is almost always a typo — don't report green on nothing run.
+  echo "NO CASES MATCHED${sel:+ (filter: ${sel[*]})}"; exit 1
+fi
 if [ "$fail" -eq 0 ]; then echo "ALL PASS ($total_c case files)"; else echo "SOME FAILED"; fi
 exit "$fail"

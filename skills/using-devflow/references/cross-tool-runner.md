@@ -74,6 +74,8 @@ devflow_cfg_fingerprint() {
 # valid <env-file> → 0 if env matches current project AND fingerprint unchanged
 devflow_env_valid() {
   local env="$1"
+  # run.env lives INSIDE RUN_DIR, so a reaped tmp dir takes its own run.env with it — this -f
+  # test therefore doubles as the "RUN_DIR still exists" guard: no file → re-bootstrap.
   [ -n "$env" ] && [ -f "$env" ] || return 1
   # Snapshot the CURRENTLY-active context BEFORE sourcing the candidate (which overwrites
   # DEVFLOW_PROJECT_ROOT / DEVFLOW_PLUGIN_DIR). A stale env from another repo or another
@@ -94,8 +96,8 @@ devflow_env_valid() {
 REUSE=""
 if [ -n "${DEVFLOW_RUN_ENV:-}" ] && devflow_env_valid "$DEVFLOW_RUN_ENV"; then
   REUSE="$DEVFLOW_RUN_ENV"                         # devflow-run exported a valid env
-elif [ "${DEVFLOW_REUSE_LAST_RUN:-0}" = "1" ] && [ -f /tmp/devflow-last-run ]; then
-  CAND="$(cat /tmp/devflow-last-run)/run.env"      # standalone reuse ONLY on opt-in
+elif [ "${DEVFLOW_REUSE_LAST_RUN:-0}" = "1" ] && [ -f "${TMPDIR:-/tmp}/devflow-last-run" ]; then
+  CAND="$(cat "${TMPDIR:-/tmp}/devflow-last-run")/run.env"   # standalone reuse ONLY on opt-in
   devflow_env_valid "$CAND" && REUSE="$CAND"
 fi
 
@@ -114,7 +116,7 @@ re-read YAML every phase.
 
 ```bash
 if [ -z "$REUSE" ]; then
-  RUN_DIR="$(mktemp -d /tmp/devflow-run.XXXXXX)"
+  RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/devflow-run.XXXXXX")"
 
   # ── A.3a: resolve config (read YAML once) ──────────────────────────────────
   # Concrete merge: defaults ← ~/.devflow/config.yaml ← ./.devflow.yaml.
@@ -156,7 +158,6 @@ emit('SESSION_REUSE', str(sec.get('session_reuse', True)).lower())
 emit('FALLBACK_COMMAND', sec.get('fallback_command', ''))
 emit('CODEX_COMMAND_PATH', sec.get('command_path', ''))
 emit('OUTPUT_DIR', cfg.get('output_dir', 'docs/devflow/reports'))
-emit('MAX_REVIEW_ITERATIONS', cfg.get('max_review_iterations', 7))
 PY
   if [ -s "$RUN_DIR/config.env" ]; then
     set -a; . "$RUN_DIR/config.env"; set +a
@@ -187,11 +188,11 @@ PY
       echo "devflow: FATAL — no codex binary supports 'exec --json'." >&2
       echo "  Tried: ${CODEX_COMMAND_PATH:-<unset>} /opt/homebrew/bin/codex /usr/local/bin/codex $(which -a codex 2>/dev/null | tr '\n' ' ')" >&2
       echo "  Fix: set codex.command_path in ~/.devflow/config.yaml to the absolute path of the Rust codex CLI." >&2
-      exit 1
+      return 1 2>/dev/null || exit 1     # sourced → return (don't kill the caller's shell); executed → exit
     fi
   else
     CLAUDE_BIN="$(command -v claude)"
-    [ -n "$CLAUDE_BIN" ] || { echo "devflow: FATAL — claude CLI not found on PATH." >&2; exit 1; }
+    [ -n "$CLAUDE_BIN" ] || { echo "devflow: FATAL — claude CLI not found on PATH." >&2; return 1 2>/dev/null || exit 1; }
   fi
 
   # ── A.3d: canonical plan path (safe location, never docs/superpowers) ──────
@@ -223,7 +224,7 @@ PY
   #  printf 'BACKEND=%q\n' "$BACKEND" >> "$RUN_DIR/run.env" — for each one.)
 
   export DEVFLOW_RUN_ENV="$RUN_DIR/run.env"
-  echo "$RUN_DIR" > /tmp/devflow-last-run
+  echo "$RUN_DIR" > "${TMPDIR:-/tmp}/devflow-last-run"
   set -a; . "$RUN_DIR/run.env"; set +a
   echo "devflow: bootstrapped run env $DEVFLOW_RUN_ENV"
 fi
@@ -372,8 +373,16 @@ anything else as out of scope.
 case "$SCOPE_MODE" in
   uncommitted)   FILES="$(git diff --name-only HEAD)";            DIFF_CMD='git diff HEAD -- <files>' ;;
   staged)        FILES="$(git diff --cached --name-only)";        DIFF_CMD='git diff --cached -- <files>' ;;
-  last-commit)   FILES="$(git diff --name-only HEAD^ HEAD)";      DIFF_CMD='git show HEAD  # or git diff HEAD^..HEAD -- <files>' ;;
-  implementation) FILES="$(git diff --name-only "$DEVFLOW_IMPL_BASE")"; DIFF_CMD="git diff $DEVFLOW_IMPL_BASE -- <files>" ;;
+  last-commit)
+    git rev-parse --verify -q HEAD^ >/dev/null 2>&1 \
+      || { echo "devflow: last-commit scope needs a parent commit (HEAD^ missing on a single-commit repo)." >&2; return 1 2>/dev/null || exit 1; }
+    FILES="$(git diff --name-only HEAD^ HEAD)";                   DIFF_CMD='git show HEAD  # or git diff HEAD^..HEAD -- <files>' ;;
+  implementation)
+    [ -n "${DEVFLOW_IMPL_BASE:-}" ] \
+      || { echo "devflow: implementation scope needs DEVFLOW_IMPL_BASE (the pre-implementation commit)." >&2; return 1 2>/dev/null || exit 1; }
+    git rev-parse --verify -q "${DEVFLOW_IMPL_BASE}^{commit}" >/dev/null 2>&1 \
+      || { echo "devflow: DEVFLOW_IMPL_BASE ('$DEVFLOW_IMPL_BASE') is not a valid commit — refusing to emit an empty scope." >&2; return 1 2>/dev/null || exit 1; }
+    FILES="$(git diff --name-only "$DEVFLOW_IMPL_BASE")";         DIFF_CMD="git diff $DEVFLOW_IMPL_BASE -- <files>" ;;
   branch)
     BASE="$REVIEW_BASE"                                           # 1) user-provided
     if [ -z "$BASE" ]; then                                       # 2) PR base, if a PR exists for this branch
@@ -384,7 +393,11 @@ case "$SCOPE_MODE" in
     for c in origin/main origin/master; do                        # 4) last resort
       [ -z "$BASE" ] && git rev-parse --verify "$c" >/dev/null 2>&1 && BASE="$c"
     done
+    [ -n "$BASE" ] \
+      || { echo "devflow: branch scope could not resolve a base — pass REVIEW_BASE or set an origin remote." >&2; return 1 2>/dev/null || exit 1; }
     MB="$(git merge-base HEAD "$BASE")"
+    [ -n "$MB" ] \
+      || { echo "devflow: no common ancestor between HEAD and $BASE (shallow clone or unrelated histories?)." >&2; return 1 2>/dev/null || exit 1; }
     FILES="$(git diff --name-only "$MB" HEAD)";                   DIFF_CMD="git diff $MB..HEAD -- <files>" ;;
   pr)            FILES="$(gh pr diff "$PR_NUMBER" --name-only)";  DIFF_CMD="gh pr diff $PR_NUMBER" ;;
   files)         FILES="<explicit path list>";                   DIFF_CMD='git diff HEAD -- <those paths>' ;;

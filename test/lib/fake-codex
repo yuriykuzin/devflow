@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Deterministic codex-CLI stub for the devflow test harness. No network, no token, no TTY.
-# Behaviour selected by FAKE_CODEX_MODE: ok (default) | ratelimit | auth | linger
+# Behaviour selected by FAKE_CODEX_MODE: ok (default) | ratelimit | auth | linger | hang
 #   ok        -> emit thread_id + agent_message(APPROVED) + turn.completed, exit 0
 #   linger    -> like ok, then sleep (stays alive after completion -> exercises drain->kill)
+#   hang      -> stay alive, emit NO events, never complete (-> exercises the hard-cap kill/124)
 #   ratelimit -> "rate limit reached" to stderr, exit 1, no events
 #   auth      -> "not logged in" to stderr, exit 1, no events (empty events file)
 # Records each real invocation to $FAKE_CODEX_LOG (if set) as "MODE|resume=0/1".
@@ -41,6 +42,7 @@ emit_ok() {
 case "$MODE" in
   ok)        emit_ok ;;
   linger)    emit_ok; sleep 30 ;;
+  hang)      sleep 30 ;;
   ratelimit) echo "Error: rate limit reached, please retry later." >&2; exit 1 ;;
   auth)      echo "Error: not logged in. Please run: codex login" >&2; exit 1 ;;
   *)         echo "fake-codex: unknown FAKE_CODEX_MODE=$MODE" >&2; exit 2 ;;

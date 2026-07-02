@@ -20,8 +20,9 @@ no hand-maintained copy to drift.
 
 The one external dependency — the `codex`/`claude` process launch — is replaced by
 `lib/fake-codex`, a stub that emits canned JSONL events (`FAKE_CODEX_MODE=ok|linger|
-ratelimit|auth`). Everything else in the runner (config merge, run.env freeze, fingerprint
-reuse, polling, kill escalation, verdict extraction, scope building, fallback) is real.
+ratelimit|auth|hang`; `hang` stays alive emitting nothing, to exercise the hard-cap timeout).
+Everything else in the runner (config merge, run.env freeze, fingerprint reuse, polling, kill
+escalation, verdict extraction, scope building, fallback) is real.
 
 ## Test seams
 
@@ -36,7 +37,7 @@ The runner reads two env overrides so tests don't wait real minutes; defaults ar
 |------|--------|
 | `10-bootstrap` | Section A: run.env produced, binary resolved via `command_path`, personas cached as content, plan path avoids `docs/superpowers`, values round-trip |
 | `20-reuse` | Section A.2: valid env reused (same RUN_DIR), changed config invalidates, foreign env rejected |
-| `30-invoke` | Section B: verdict + session captured, exit 0; `session_reuse=false` ephemeral; linger → bounded drain → kill 124 |
+| `30-invoke` | Section B: verdict + session captured, exit 0; `session_reuse=false` ephemeral; `resume` path when `RESUME_ID` set; linger → completes then bounded drain; hang → poll exhausts → hard-cap kill 124 |
 | `40-killwait` | `devflow_kill_wait` escalates to `-9` on a SIGTERM-ignoring child, returns bounded |
 | `50-scope` | Section C: per-mode file sets + DIFF_CMD, untracked enumeration, branch base resolution |
 | `60-fallback` | Section D: success passes, rate-limit retries once via fallback, auth escalates w/o retry, empty fallback escalates |

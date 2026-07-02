@@ -81,7 +81,7 @@ Run `/devflow-review` workflow if available, or do inline:
 
 If critical issues found:
 - **attended**: present to user
-- **unattended**: attempt fix + re-review (max 2 iterations)
+- **unattended**: attempt fix + re-review, iterating until APPROVED — no fixed cap. If the same blocking issues recur with no progress, stop, record the unresolved issues in the report, and mark the phase CHANGES_REQUESTED (no user to prompt in this mode).
 
 ---
 
@@ -93,13 +93,13 @@ Generate and save comprehensive report:
 # Devflow Report: <feature>
 **Date**: YYYY-MM-DD | **Autonomy**: attended/unattended
 
-## Phase 1: Planning — ✅
+## Phase 1: Planning
 - Plan: `<path>` | Review iterations: N
 
-## Phase 2: Implementation — ✅
+## Phase 2: Implementation
 - Files changed: N | Review iterations: N
 
-## Phase 3: Final Review — ✅ / ⚠️
+## Phase 3: Final Review
 - Critical: 0 | Important: N (resolved)
 
 ## Next Steps
@@ -131,5 +131,5 @@ Save to `docs/devflow/reports/YYYY-MM-DD-<feature>-report.md`.
 | Error | Action |
 |-------|--------|
 | External CLI not found | Suggest install, offer config change |
-| Phase fails after max retries | Save progress, escalate to user |
+| Phase stuck (blocking issues recur, no progress) | Save progress; attended → escalate to user, unattended → record unresolved issues + mark CHANGES_REQUESTED |
 | User cancels mid-pipeline | Save all artifacts so far, report status |

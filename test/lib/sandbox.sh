@@ -7,6 +7,9 @@ mk_sandbox(){
   SB="$(mktemp -d "${TMPDIR:-/tmp}/devflow-sb.XXXXXX")"
   export HOME="$SB/home"; mkdir -p "$HOME/.devflow"
   : > "$HOME/.devflow/config.yaml"                 # empty global override (defaults come from plugin dir)
+  # Redirect TMPDIR into the sandbox so the runner's RUN_DIR + last-run land under $SB and are
+  # cleaned with it — no more leaked /tmp/devflow-run.* dirs accumulating across test runs.
+  export TMPDIR="$SB/tmp"; mkdir -p "$TMPDIR"
   export FAKE_CODEX_LOG="$SB/codex.log"; : > "$FAKE_CODEX_LOG"
 
   REPO_FX="$SB/proj"; mkdir -p "$REPO_FX"
@@ -34,7 +37,7 @@ YAML
   export DEVFLOW_PLUGIN_DIR="$DEVFLOW_TEST_REPO"   # real checkout -> real config.default.yaml + personas
   # Start each case from a clean bootstrap slate.
   unset DEVFLOW_RUN_ENV DEVFLOW_REUSE_LAST_RUN REUSE RUN_DIR
-  rm -f /tmp/devflow-last-run
+  rm -f "${TMPDIR:-/tmp}/devflow-last-run"
   export SB REPO_FX
 }
 

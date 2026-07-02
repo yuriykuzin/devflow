@@ -6,13 +6,17 @@ on:
 
 jobs:
   harness:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]   # exercise both the GNU and BSD stat/bash paths
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.12'
       - name: Install PyYAML
-        run: pip install pyyaml
+        run: pip install 'pyyaml==6.0.2'
       - name: Run devflow harness
         run: bash test/run.sh

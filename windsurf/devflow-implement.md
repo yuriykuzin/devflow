@@ -167,7 +167,7 @@ codex -c 'model_reasoning_effort="<implementer.effort>"' \
 ## Phase 5 — Process Review & Iterate
 
 - **APPROVED** → Phase 6
-- **ISSUES** → fix, re-review (resume session). Max 5 iterations.
+- **ISSUES** → fix, re-review (resume session). Iterate until APPROVED — no fixed cap. If the same blocking issues recur with no progress, surface them to the user instead of looping.
 
 ---
 

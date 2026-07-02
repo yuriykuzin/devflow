@@ -1,5 +1,7 @@
 # Devflow — Cross-Tool AI Workflow Orchestrator
 
+[![test](https://github.com/yuriykuzin/devflow/actions/workflows/test.yml/badge.svg)](https://github.com/yuriykuzin/devflow/actions/workflows/test.yml)
+
 Automates the planning → implementation → review pipeline across multiple AI coding tools (Claude Code, Codex CLI, Windsurf, Gemini CLI, Cursor).
 
 ## How It Works
@@ -102,7 +104,7 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 - **Shared config**: `~/.devflow/config.yaml` is read by all agents
 - **Symlinks everywhere**: Codex (`~/.agents/skills/devflow`) and Windsurf (`workflows/devflow-*.md`) both point back to the repo
 - **Direct reads**: Claude Code, Cursor, and Gemini read from the repo directory
-- **Session files**: stored under a per-run dir `/tmp/devflow-run.XXXXXX/` (namespaced so concurrent runs in different repos don't collide); `/tmp/devflow-last-run` points at the latest
+- **Session files**: stored under a per-run dir (`$TMPDIR/devflow-run.XXXXXX/`, e.g. `/tmp/devflow-run.XXXXXX/` — namespaced so concurrent runs in different repos don't collide); `$TMPDIR/devflow-last-run` points at the latest
 - **Per-project overrides**: `.devflow.yaml` in project root overrides global config
 
 ## Configuration
@@ -166,6 +168,8 @@ codex:
 autonomy: attended         # attended | unattended
 output_dir: "docs/devflow/reports"
 ```
+
+> `command`/`flags` in the reference above are illustrative — they document the CLI invocation devflow builds internally, not separately-honored knobs. The keys that change behavior are `backend`, `model`, `effort`, `command_path`, `session_reuse`, and `fallback_command`.
 
 ### Model Tiers
 
@@ -270,6 +274,17 @@ After installation:
 ~/.codeium/.../devflow-*.md                    # Windsurf: symlinks → windsurf/
 ~/.claude/plugins/cache/devflow-local/...       # Claude Code: plugin cache
 ```
+
+## Development
+
+Run the offline test harness — no API token, no network. It extracts the real bash from `cross-tool-runner.md` and drives it against a fake codex stub in throwaway sandboxes:
+
+```bash
+bash test/run.sh            # all cases
+bash test/run.sh 30 60      # only cases matching these prefixes
+```
+
+CI runs the same suite on Linux and macOS on every push and PR. See [`test/README.md`](test/README.md) for how the harness stays honest and the seams it exposes.
 
 ## License
 

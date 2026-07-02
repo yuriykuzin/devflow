@@ -194,7 +194,7 @@ APPROVED / CHANGES_REQUESTED
 If user asks to fix and re-review:
 1. Fix the critical/important issues
 2. Re-run Phase 4 with updated diff (resume existing session)
-3. Repeat until APPROVED or max iterations
+3. Repeat until APPROVED — no fixed cap. If the same blocking issues recur with no progress, surface them to the user instead of looping.
 
 **Implementation handoff** — if fixes are complex:
 

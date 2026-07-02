@@ -18,4 +18,4 @@ Devflow skills use Claude Code tool names. When running under Gemini CLI, use th
 
 - Gemini CLI reads `GEMINI.md` and `gemini-extension.json` from the repo root.
 - External CLI calls (`codex exec`, `claude -p`) work identically — they run via shell.
-- Session files live under a per-run dir `/tmp/devflow-run.XXXXXX/` (see cross-tool-runner.md); `/tmp/devflow-last-run` points at the latest. Gemini has no background tasks — use the portable `nohup &` + poll form from runner Section B.
+- Session files live under a per-run dir (`$TMPDIR/devflow-run.XXXXXX/`, e.g. `/tmp/devflow-run.XXXXXX/`; see cross-tool-runner.md); `$TMPDIR/devflow-last-run` points at the latest. Gemini has no background tasks — use the portable `nohup &` + poll form from runner Section B.

@@ -58,5 +58,45 @@ DEVFLOW_PLAN_PATH="/tmp/some-plan.md" run_scope plan
 has "$FILES" "/tmp/some-plan.md" "plan mode: FILES = the plan path"
 has "$DIFF_CMD" "cat" "plan mode: DIFF_CMD reads the plan read-only"
 
+# guards: a scope mode that can't resolve its base must fail loudly AND non-zero, never emit an
+# empty scope (the exact bug scope-pinning prevents). Assert BOTH the message and the return code
+# — a guard that only warns and then falls through to empty FILES would pass a message-only check.
+# Throwaway repo with no remote/origin so branch-base resolution has nothing to fall back to.
+mk_noremote(){ cd "$SB" && rm -rf noremote && mkdir noremote && cd noremote
+  git init -q; git config user.email t@example.test; git config user.name tester; git config commit.gpgsign false
+  printf 'x\n' > f.txt; git add -A; git commit -qm only; }
+
+guard_err="$( mk_noremote
+  SCOPE_MODE=branch REVIEW_BASE="" PR_NUMBER="" DEVFLOW_IMPL_BASE="" DEVFLOW_PLAN_PATH=""
+  . "$EXTRACTED/c.sh" 2>&1 )"; guard_rc=$?
+has  "$guard_err" "could not resolve a base" "branch scope with no base fails loudly (no silent empty scope)"
+isnt "$guard_rc" "0"                          "branch scope with no base returns non-zero (aborts, not just warns)"
+
+# non-empty but invalid impl base: must abort, not silently diff a bad ref down to an empty scope.
+impl_err="$( mk_noremote
+  SCOPE_MODE=implementation REVIEW_BASE="" PR_NUMBER="" DEVFLOW_IMPL_BASE="deadbeefdeadbeef" DEVFLOW_PLAN_PATH=""
+  . "$EXTRACTED/c.sh" 2>&1 )"; impl_rc=$?
+has  "$impl_err" "not a valid commit" "implementation scope with bad base fails loudly"
+isnt "$impl_rc" "0"                   "implementation scope with bad base returns non-zero (no empty-scope diff)"
+
+# HEAD^ missing: last-commit scope on a single-commit repo must abort, not diff a non-existent parent.
+head_err="$( mk_noremote
+  SCOPE_MODE=last-commit REVIEW_BASE="" PR_NUMBER="" DEVFLOW_IMPL_BASE="" DEVFLOW_PLAN_PATH=""
+  . "$EXTRACTED/c.sh" 2>&1 )"; head_rc=$?
+has  "$head_err" "needs a parent commit" "last-commit scope on a single-commit repo fails loudly"
+isnt "$head_rc" "0"                       "last-commit scope with no HEAD^ returns non-zero"
+
+# No common ancestor: branch scope against an unrelated-history base must abort, not emit scope from
+# an empty merge-base. Build a second root via an orphan branch, then diff the original branch vs it.
+mb_err="$(
+  mk_noremote
+  base_branch="$(git symbolic-ref --short HEAD)"
+  git checkout -q --orphan unrelated; git rm -rfq .; printf 'z\n' > z.txt; git add -A; git commit -qm orphan
+  git checkout -q "$base_branch"
+  SCOPE_MODE=branch REVIEW_BASE="unrelated" PR_NUMBER="" DEVFLOW_IMPL_BASE="" DEVFLOW_PLAN_PATH=""
+  . "$EXTRACTED/c.sh" 2>&1 )"; mb_rc=$?
+has  "$mb_err" "no common ancestor" "branch scope with unrelated histories fails loudly"
+isnt "$mb_rc" "0"                    "branch scope with empty merge-base returns non-zero"
+
 cleanup_sandbox
 report

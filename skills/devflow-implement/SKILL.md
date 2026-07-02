@@ -34,8 +34,6 @@ digraph implement {
     "Parse reviewer response" [shape=box];
     "Issues found?" [shape=diamond];
     "Fix issues" [shape=box];
-    "Max iterations?" [shape=diamond];
-    "Escalate to user" [shape=box];
     "Implementation finalized" [shape=doublecircle];
 
     "Read devflow config" -> "Read plan file";
@@ -49,10 +47,7 @@ digraph implement {
     "Call external reviewer via CLI" -> "Parse reviewer response";
     "Parse reviewer response" -> "Issues found?";
     "Issues found?" -> "Fix issues" [label="yes"];
-    "Fix issues" -> "Max iterations?";
-    "Max iterations?" -> "Escalate to user" [label="yes"];
-    "Max iterations?" -> "Call external reviewer via CLI" [label="no"];
-    "Escalate to user" -> "Implementation finalized";
+    "Fix issues" -> "Call external reviewer via CLI" [label="re-review"];
     "Issues found?" -> "Implementation finalized" [label="no — approved"];
 }
 ```
@@ -211,7 +206,7 @@ Same iteration logic as `devflow:plan` Step 4:
 - **ISSUES found**:
   - Fix critical and important issues
   - Re-run external review
-  - Max 7 iterations (from config `max_review_iterations`), then escalate to user — present all remaining issues and ask what actions to take
+  - Iterate until APPROVED — no fixed cap. (Attended mode: if the same blocking issues recur with no progress, surface them to the user instead of looping.)
 
 When fixing issues, use the current tool's capabilities (edit files, run tests). Do NOT call the external tool for fixes — only for review.
 
