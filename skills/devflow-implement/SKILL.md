@@ -56,24 +56,65 @@ digraph implement {
 
 ### Step 1: Bootstrap (config + personas + binary, once)
 
-Run **Section A** of `skills/using-devflow/references/cross-tool-runner.md` — same as
-`devflow:plan` Step 1. Resolves backend, reviewer/implementer model+effort,
-`session_reuse`, `fallback_command`, personas, validated codex binary, and
-`$DEVFLOW_PLAN_PATH`, frozen into a `run.env` (reused if valid, else re-bootstrapped).
-
-A prior `devflow:plan` exports its `run.env`, so `$PLAN_SESSION_FILE` is already
-available for session continuity:
 ```bash
-[ -n "$PLAN_SESSION_FILE" ] && [ -s "$PLAN_SESSION_FILE" ] && echo "Plan-review session available: $(cat "$PLAN_SESSION_FILE")"
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+```
+
+Same as `devflow:plan` Step 1 — resolves backend, reviewer/implementer model+effort,
+`session_reuse`, `fallback_command`, personas, validated codex binary, and
+`$DEVFLOW_PLAN_PATH`, frozen into `$RUN_DIR/run.env` (reused if valid, else
+re-bootstrapped — `bootstrap`'s stdout says `REUSED=0` or `1`). If invoking this skill
+standalone against an old plan/checkout, or a `--resume` below fails on an expired
+session, re-run `bootstrap --fresh` first.
+
+A prior `devflow:plan` run already left a session behind at
+`$RUN_DIR/plan-review.session` (same file `$PLAN_SESSION_FILE` names) — check it for
+continuity:
+```bash
+[ -s "$RUN_DIR/plan-review.session" ] && echo "Plan-review session available: $(cat "$RUN_DIR/plan-review.session")"
 ```
 
 ### Step 2: Read and Validate Plan
 
-If invoked standalone with a user-provided plan path, set `DEVFLOW_PLAN_PATH` to it
-(`echo "DEVFLOW_PLAN_PATH=\"<path>\"" >> "$RUN_DIR/run.env"`); when chained after Phase 1
-it is already set in `run.env`.
+If invoked standalone with a user-provided plan path, set `DEVFLOW_PLAN_PATH` to it by
+appending an override line — later assignments win when the file is sourced, so this
+overrides bootstrap's computed default without re-running bootstrap:
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+printf 'DEVFLOW_PLAN_PATH=%q\n' "<path>" >> "$RUN_DIR/run.env"
+```
+When chained after Phase 1 it is already set correctly from `devflow:plan` Step 2.
 
 ```bash
+set -a; . "$RUN_DIR/run.env"; set +a
 cat "$DEVFLOW_PLAN_PATH"
 ```
 
@@ -90,11 +131,29 @@ If plan is missing or invalid, ask user for the correct path.
 implementation changes (including any per-task auto-commits superpowers makes):
 
 ```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
 DEVFLOW_IMPL_BASE="$(git rev-parse HEAD)"
-echo "DEVFLOW_IMPL_BASE=\"$DEVFLOW_IMPL_BASE\"" >> "$RUN_DIR/run.env"
+printf 'DEVFLOW_IMPL_BASE=%q\n' "$DEVFLOW_IMPL_BASE" >> "$RUN_DIR/run.env"
 ```
 
-Section C (`SCOPE_MODE=implementation`) uses `$DEVFLOW_IMPL_BASE` as the diff base.
+`scope implementation --impl-base "$DEVFLOW_IMPL_BASE"` uses this as the diff base —
+pass it explicitly as a flag each time rather than relying on it being sourced (it's
+also frozen into `run.env` above so it survives a fresh Bash call if you need to re-read
+it: `set -a; . "$RUN_DIR/run.env"; set +a`).
 
 Choose execution mode based on platform capabilities:
 
@@ -118,16 +177,16 @@ superpowers made:
 git diff "$DEVFLOW_IMPL_BASE" --stat
 ```
 
-Section C (`SCOPE_MODE=implementation`) builds the reviewer's scope block from this base;
-you don't need to stuff the diff into the prompt — the reviewer runs
-`git diff $DEVFLOW_IMPL_BASE` itself.
+`bash "$RUNNER" scope implementation --impl-base "$DEVFLOW_IMPL_BASE"` builds the
+reviewer's scope block from this base; you don't need to stuff the diff into the prompt
+— the reviewer runs `git diff $DEVFLOW_IMPL_BASE` itself.
 
 ### Step 5: Internal + External Review (parallel)
 
 Launch both reviews simultaneously. Two axes of diversity: **personas × tools**.
 
 **Internal review** (multi-persona, background sub-agents):
-Read persona definitions from `$PERSONAS_REF` (cached by Section A; falls back to
+Read persona definitions from `$PERSONAS_REF` (cached by `bootstrap`; falls back to
 `skills/devflow-review/references/review-personas.md`).
 For each enabled persona, use the Agent tool to spawn a background sub-agent. Pass it:
 - The persona's review lens (from review-personas.md)
@@ -155,13 +214,53 @@ Both feed into Step 6 (Process Review Response) for synthesis.
 
 #### External review prompt
 
-Artifact paths (`$OUT`, `$EVENTS`, `$SESSION_FILE`, `$PLAN_SESSION_FILE`) come from
-`run.env`, namespaced under `$RUN_DIR`.
+Artifact paths (`$RUN_DIR/impl-review-output.txt`, `-events.jsonl`, `-stderr.txt`,
+`impl-review.session`) are namespaced under `$RUN_DIR` by `run-external --phase
+impl-review` — you don't construct these paths by hand.
 
 The external reviewer runs in the repo with full tool access. Instead of stuffing
 diffs and plan content into prompt variables, let the tool explore the repo itself.
+The prompt text is defined inline in the "Run the call" bash block below, not as a
+separate shell variable here — Claude Code resets shell state between every Bash tool
+call, so a `REVIEW_PROMPT="..."` assigned in its own code block would be empty by the
+time the next block reads it. Shown here for reference; this is the exact text used:
 
 ```
+You are reviewing a code implementation against its plan. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file and run read-only verification (tests, linters, type-checkers, builds in check mode) to ground your findings; do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
+
+Read the plan at: $DEVFLOW_PLAN_PATH
+Then run git commands to see the implementation changes (git diff, git show, etc.).
+
+REVIEW CHECKLIST:
+1. PLAN COMPLIANCE — implements everything in the plan?
+2. CODE QUALITY — clean code, error handling, no bugs?
+3. TESTING — adequate tests, edge cases?
+4. PATTERNS — follows project conventions?
+5. SECURITY — any concerns?
+
+For each issue: severity, file:line, fix.
+Respond: APPROVED or CHANGES_REQUESTED
+```
+
+#### Run the call (both backends)
+
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+set -a; . "$RUN_DIR/run.env"; set +a   # brings back DEVFLOW_IMPL_BASE (Step 3) and DEVFLOW_PLAN_PATH
 REVIEW_PROMPT="You are reviewing a code implementation against its plan. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file and run read-only verification (tests, linters, type-checkers, builds in check mode) to ground your findings; do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
 
 Read the plan at: $DEVFLOW_PLAN_PATH
@@ -176,27 +275,41 @@ REVIEW CHECKLIST:
 
 For each issue: severity, file:line, fix.
 Respond: APPROVED or CHANGES_REQUESTED"
+bash "$RUNNER" scope implementation --impl-base "$DEVFLOW_IMPL_BASE" > "$RUN_DIR/impl-review-scope.txt"
+
+PLAN_SESSION="$RUN_DIR/plan-review.session"; IMPL_SESSION="$RUN_DIR/impl-review.session"
+if [ -s "$IMPL_SESSION" ]; then
+  RESUME_ID="$(cat "$IMPL_SESSION")"
+  PROMPT_BODY="Issues were fixed. Re-review: run git diff $DEVFLOW_IMPL_BASE."
+elif [ -s "$PLAN_SESSION" ]; then
+  RESUME_ID="$(cat "$PLAN_SESSION")"
+  PROMPT_BODY="The plan you reviewed is now implemented. Review the code changes. $REVIEW_PROMPT"
+else
+  RESUME_ID=""
+  PROMPT_BODY="$REVIEW_PROMPT"
+fi
+printf '%s\n\n%s\n' "$(cat "$RUN_DIR/impl-review-scope.txt")" "$PROMPT_BODY" > "$RUN_DIR/impl-review-prompt.txt"
+
+if [ -n "$RESUME_ID" ]; then
+  bash "$RUNNER" run-external --phase impl-review --prompt-file "$RUN_DIR/impl-review-prompt.txt" --resume "$RESUME_ID"
+else
+  bash "$RUNNER" run-external --phase impl-review --prompt-file "$RUN_DIR/impl-review-prompt.txt"
+fi
 ```
 
-#### Run the call (both backends)
+- **Scope** — `scope implementation --impl-base "$DEVFLOW_IMPL_BASE"` (diff base from
+  Step 3 + the plan at `$DEVFLOW_PLAN_PATH`).
+- **Invocation** — `run-external --phase impl-review`. Prefer resuming the plan-review
+  session on the first call (the reviewer already knows the plan and prior feedback);
+  once `impl-review.session` itself exists, resume that instead on later iterations.
+- **Fallback** — folded into `run-external` automatically.
 
-Run the implementation review via `skills/using-devflow/references/cross-tool-runner.md`:
+Verdict = `VERDICT_STATUS` (`APPROVED` / `CHANGES_REQUESTED`); full text at `VERDICT_FILE`.
+If `VERDICT_STATUS=UNKNOWN`, do not treat it as pass or fail — read `VERDICT_FILE`
+directly and judge from the text.
 
-- **Scope** — **Section C** with `SCOPE_MODE=implementation` (diff base
-  `$DEVFLOW_IMPL_BASE` from Step 3 + the plan at `$DEVFLOW_PLAN_PATH`).
-- **Invocation** — **Section B** with `PHASE=impl-review`, reviewer model/effort from
-  `run.env`:
-  - **Prefer resuming `$PLAN_SESSION_FILE`** if present (the reviewer already knows the
-    plan and prior feedback — prepend `"The plan you reviewed is now implemented. Review
-    the code changes."` to `$REVIEW_PROMPT`). Otherwise start a fresh session.
-  - Capture the session to `$SESSION_FILE`; later iterations resume it
-    (`"Issues were fixed. Re-review: run git diff $DEVFLOW_IMPL_BASE."`).
-- **Fallback** — **Section D**.
-
-Verdict = last `agent_message` (`APPROVED` / `CHANGES_REQUESTED`).
-
-**Large diffs**: if the changeset exceeds ~50KB, run Section C/B per file group and
-synthesize.
+**Large diffs**: if the changeset exceeds ~50KB, run `scope`/`run-external` per file
+group and synthesize.
 
 ### Step 6: Process Review Response
 
@@ -210,10 +323,31 @@ Same iteration logic as `devflow:plan` Step 4:
 
 When fixing issues, use the current tool's capabilities (edit files, run tests). Do NOT call the external tool for fixes — only for review.
 
-**Implementation handoff**: If fixes are complex, resume `$SESSION_FILE` with
-**implementer** settings via cross-tool-runner.md **Section B** (swap `REVIEWER_*` →
-`IMPLEMENTER_*`, set `PERMISSION_MODE=default` for the claude backend), prompt `"Fix the issues you found in your review."` Section D fallback
-applies.
+**Implementation handoff**: If fixes are complex, resume the impl-review session with
+**implementer** settings:
+
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+bash "$RUNNER" run-external --phase impl-fix --role implementer --permission-mode default \
+  --resume "$(cat "$RUN_DIR/impl-review.session")" --prompt-file "$RUN_DIR/impl-fix-prompt.txt"
+```
+
+(`impl-fix-prompt.txt` containing `"Fix the issues you found in your review."`). The same
+rate-limit/auth fallback applies automatically.
 
 ### Step 7: Finalize
 

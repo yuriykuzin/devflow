@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
-# Section D failure handling: success passes; a transient rate-limit retries once via the
-# fallback binary; a permanent auth failure escalates WITHOUT a retry; empty fallback escalates.
+# devflow_after_call: success passes; a transient rate-limit retries once via the fallback
+# binary; a permanent auth failure escalates WITHOUT a retry; empty fallback escalates.
 set -u
 export DEVFLOW_POLL_SCHEDULE="1 1 1 1 1 1"
 . "$LIB/assert.sh"; . "$LIB/sandbox.sh"
 
 mk_sandbox
 bootstrap_here
-. "$EXTRACTED/b.sh"
-. "$EXTRACTED/d.sh"
+# White-box: source the real script for devflow_run_external/devflow_after_call (guarded
+# main means sourcing does not auto-dispatch).
+. "$RUNNER"
 
 PHASE="final-review"; MODEL="$REVIEWER_MODEL"; EFFORT="$REVIEWER_EFFORT"; PROMPT="review"
 CRAFT_ERR="$SB/craft.stderr"; CRAFT_EV="$SB/craft.events"
-# A non-empty, non-error events file: forces devflow_after_call to decide on STDERR content
-# alone, so the codex empty-events escalation (a DIFFERENT branch) can't be what produces the
-# result. Case (5) below covers the empty-events branch on its own.
 printf '{"type":"turn.completed"}\n' > "$CRAFT_EV"
 
 # (1) clean success -> return 0, no fallback
@@ -46,7 +44,6 @@ has "$err" "auth" "...via the auth/capability branch (not a rate-limit retry)"
 is "$(wc -l < "$FAKE_CODEX_LOG" | tr -d ' ')" "0" "no fallback retry burned on auth failure"
 
 # (4) rate limit, no fallback configured -> escalate via the rate-limit branch.
-# Non-empty EVENTS proves the escalation is NOT the empty-events branch firing by accident.
 CODEX_EXIT=1; CALL_RESULT=""; STDERR="$CRAFT_ERR"; EVENTS="$CRAFT_EV"
 printf 'Error: rate limit reached\n' > "$STDERR"
 FALLBACK_COMMAND=""

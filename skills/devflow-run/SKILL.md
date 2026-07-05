@@ -93,13 +93,41 @@ digraph run {
    - "don't ask me" / "--unattended" → `unattended`
    - Default → `attended`
 
-**Bootstrap once:** run **Section A** of
-`skills/using-devflow/references/cross-tool-runner.md`. This creates the shared per-run
-`RUN_DIR`, resolves config (backend, reviewer/implementer model+effort, `session_reuse`,
-`fallback_command`, `output_dir`), caches personas, validates the codex binary, and
-computes `$DEVFLOW_PLAN_PATH` — frozen into `run.env` and exported as `DEVFLOW_RUN_ENV`.
-Phases 1–3 inherit this env and `source` it; they do NOT re-read config/personas or
-re-resolve codex.
+**Bootstrap once:**
+
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+SLUG="$(printf '%s' "$FEATURE_DESCRIPTION" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-40)"
+BOOT="$(bash "$RUNNER" bootstrap --slug "${SLUG:-feature}")"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+```
+
+This creates the shared per-project `RUN_DIR`, resolves config (backend,
+reviewer/implementer model+effort, `session_reuse`, `fallback_command`, `output_dir`),
+caches personas, validates the codex binary, and computes `$DEVFLOW_PLAN_PATH` — frozen
+into `$RUN_DIR/run.env`. `RUN_DIR` is deterministic per project (a hash of the repo root
+under `${TMPDIR:-/tmp}`, never inside the repo), so every phase — even in a fresh Bash
+call with no inherited shell state — gets back the same `RUN_DIR` and the same frozen
+values by re-running `bootstrap` (cheap: it detects the existing valid `run.env` and
+returns immediately, `REUSED=1`); they do NOT re-read config/personas or re-resolve
+codex. `--slug` (derived from the feature description) wipes and rebuilds the whole
+`RUN_DIR` when it differs from the frozen one — not just `DEVFLOW_PLAN_PATH`, but every
+phase session file too — so two same-day `devflow:run` features never collide on one
+plan file or resume each other's review session. Starting a fresh `devflow:run` in a
+checkout with old devflow state (stale sessions, superseded config) should pass
+`bootstrap --fresh` here.
 - **Orchestrator** (you): uses its own model (e.g., `opus-4.6` in Windsurf, whatever the host agent runs).
 
 **Create a TodoWrite/todo_list with phases to track progress.**
@@ -114,7 +142,7 @@ re-resolve codex.
 **Output**: Plan file at the canonical `$DEVFLOW_PLAN_PATH` (under `output_dir`, not `docs/superpowers/`).
 
 **Session artifact**: After plan review completes, the session file is at
-`$PLAN_SESSION_FILE` (under `$RUN_DIR`, from `run.env`). This carries context to Phase 2.
+`$RUN_DIR/plan-review.session`. This carries context to Phase 2.
 
 **In attended mode**: After plan is finalized, present summary to user:
 > "Phase 1 complete. Plan saved to `<path>`. External review: APPROVED after N iterations. Proceed to implementation?"
@@ -130,7 +158,7 @@ re-resolve codex.
 
 **Input**: Plan file from Phase 1 (or user-provided path)
 
-**Session continuity**: `devflow:implement` resumes `$PLAN_SESSION_FILE` (inherited via the shared `run.env`) for code review — the reviewer already knows the plan and prior feedback.
+**Session continuity**: `devflow:implement` resumes `$RUN_DIR/plan-review.session` (same `RUN_DIR`, re-derived from `bootstrap`'s stdout — no shell inheritance needed) for code review — the reviewer already knows the plan and prior feedback.
 
 **Output**: Code changes in working directory + review report
 
@@ -213,7 +241,7 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 |-------|--------|
 | External tool CLI not found | Tell user to install it, suggest config change |
 | External tool returns error | Retry once, then show error to user |
-| External tool timeout | ~8–10 min hard-cap (cross-tool-runner.md Section B) → kill, surface last event, escalate |
+| External tool timeout | ~8–10 min hard-cap (`run-external`'s internal poll loop) → kill, surface last event, escalate |
 | Plan file not found (Phase 2) | Ask user for path |
 | Config file invalid YAML | Use defaults, warn user |
 | Superpowers not installed | Tell user to install superpowers first |
@@ -227,6 +255,6 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 - **Report everything** — save reports for audit trail
 - **Superpowers skills do the heavy lifting** — devflow orchestrates between tools
 - **Model tiers matter** — reviewer effort ≥ implementer (claude: `max` review / `high` impl; codex: `high` for both)
-- **Config + personas + codex binary resolved once** in Step 0 (`run.env` under a per-run `RUN_DIR`); phases source it, never re-read
-- **External calls are non-blocking** — launched in background and polled (cross-tool-runner.md Section B); no 2-min-timeout deaths
+- **Config + personas + codex binary resolved once** in Step 0 (`run.env` under the deterministic per-project `RUN_DIR`); every phase's `bash "$RUNNER" ...` call loads it automatically, never re-reads YAML
+- **External calls are non-blocking** — `run-external` backgrounds its own child process and polls internally; no 2-min-timeout deaths. On Claude Code, launch the `run-external` call itself with the Bash tool's `run_in_background: true` rather than polling in a loop (see cross-tool-runner.md's async-execution guidance)
 - **Session reuse saves tokens** — ~20k tokens saved per resumed iteration

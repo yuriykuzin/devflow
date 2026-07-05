@@ -104,7 +104,10 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 - **Shared config**: `~/.devflow/config.yaml` is read by all agents
 - **Symlinks everywhere**: Codex (`~/.agents/skills/devflow`) and Windsurf (`workflows/devflow-*.md`) both point back to the repo
 - **Direct reads**: Claude Code, Cursor, and Gemini read from the repo directory
-- **Session files**: stored under a per-run dir (`$TMPDIR/devflow-run.XXXXXX/`, e.g. `/tmp/devflow-run.XXXXXX/` — namespaced so concurrent runs in different repos don't collide); `$TMPDIR/devflow-last-run` points at the latest
+- **Session files**: stored under `RUN_DIR`, a deterministic path derived from a hash of
+  the repo root under `${TMPDIR:-/tmp}` (namespaced per project, never inside the repo) —
+  `bash scripts/devflow-runner.sh bootstrap` always resolves back to the same directory
+  for a given checkout; run it to recover the path rather than guessing
 - **Per-project overrides**: `.devflow.yaml` in project root overrides global config
 
 ## Configuration

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Deterministic claude-CLI stub for the devflow test harness. No network, no token, no TTY.
+# Behaviour selected by FAKE_CLAUDE_MODE: ok (default) | ratelimit | auth | hang
+#   ok        -> print {"result":"...","session_id":"..."} to stdout, exit 0
+#   hang      -> stay alive, print nothing, never exit (-> exercises the hard-cap kill/124).
+#                Unlike fake-codex there is no separate "linger" mode: claude has no
+#                turn.completed-style mid-stream signal, so devflow_run_external's poll
+#                loop has only one way to detect a claude call is done — the process
+#                exiting — and only one way to detect it's stuck — the hard cap.
+#   ratelimit -> "rate limit reached" to stderr, exit 1, no stdout
+#   auth      -> "not logged in" to stderr, exit 1, no stdout
+# Records each real invocation to $FAKE_CLAUDE_LOG (if set) as
+# "MODE|resume=0/1|permission-mode=<m>|no-session-persistence=0/1".
+set -u
+joined=" $* "
+
+is_resume=0
+case "$joined" in *" --resume "*) is_resume=1 ;; esac
+
+no_persist=0
+case "$joined" in *" --no-session-persistence "*) no_persist=1 ;; esac
+
+pmode=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "--permission-mode" ] && pmode="$a"
+  prev="$a"
+done
+
+MODE="${FAKE_CLAUDE_MODE:-ok}"
+[ -n "${FAKE_CLAUDE_LOG:-}" ] && printf '%s|resume=%s|permission-mode=%s|no-session-persistence=%s\n' \
+  "$MODE" "$is_resume" "$pmode" "$no_persist" >> "$FAKE_CLAUDE_LOG"
+
+emit_ok() {
+  local text="${FAKE_CLAUDE_VERDICT:-Reviewed the change. No blocking issues found. APPROVED}"
+  printf '{"result":"%s","session_id":"claude_test_session_xyz"}\n' \
+    "$(printf '%s' "$text" | sed 's/"/\\"/g')"
+}
+
+case "$MODE" in
+  ok)        emit_ok ;;
+  hang)      sleep 30 ;;
+  ratelimit) echo "Error: rate limit reached, please retry later." >&2; exit 1 ;;
+  auth)      echo "Error: not logged in. Please run: claude login" >&2; exit 1 ;;
+  *)         echo "fake-claude: unknown FAKE_CLAUDE_MODE=$MODE" >&2; exit 2 ;;
+esac

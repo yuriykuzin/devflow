@@ -1,16 +1,21 @@
 # Fixture builders for the harness. Sourced by cases after assert.sh.
-# Requires env from run.sh: EXTRACTED (dir with a1..d.sh), LIB (this dir), DEVFLOW_TEST_REPO.
+# Requires env from run.sh: RUNNER (path to devflow-runner.sh), LIB (this dir), DEVFLOW_TEST_REPO.
 
 # mk_sandbox: fresh fake HOME + fixture git repo + project .devflow.yaml pointing at fake-codex.
 # Exports: SB (sandbox root), REPO_FX (fixture project root), HOME, FAKE_CODEX_LOG.
 mk_sandbox(){
   SB="$(mktemp -d "${TMPDIR:-/tmp}/devflow-sb.XXXXXX")"
   export HOME="$SB/home"; mkdir -p "$HOME/.devflow"
-  : > "$HOME/.devflow/config.yaml"                 # empty global override (defaults come from plugin dir)
-  # Redirect TMPDIR into the sandbox so the runner's RUN_DIR + last-run land under $SB and are
-  # cleaned with it — no more leaked /tmp/devflow-run.* dirs accumulating across test runs.
-  export TMPDIR="$SB/tmp"; mkdir -p "$TMPDIR"
   export FAKE_CODEX_LOG="$SB/codex.log"; : > "$FAKE_CODEX_LOG"
+
+  # command_path/fallback_command are ONLY trusted from global config
+  # (~/.devflow/config.yaml) — never from a project-level .devflow.yaml. The fixture
+  # mirrors that trust boundary: the fake-codex path lives here, not in $REPO_FX.
+  cat > "$HOME/.devflow/config.yaml" <<YAML
+codex:
+  command_path: "$LIB/fake-codex"
+  fallback_command: ""
+YAML
 
   REPO_FX="$SB/proj"; mkdir -p "$REPO_FX"
   (
@@ -27,27 +32,28 @@ mk_sandbox(){
   cat > "$REPO_FX/.devflow.yaml" <<YAML
 backend: codex
 codex:
-  command_path: "$LIB/fake-codex"
   reviewer:    { model: gpt-5.5, effort: high }
   implementer: { model: gpt-5.5, effort: high }
   session_reuse: true
-  fallback_command: ""
 YAML
 
-  export DEVFLOW_PLUGIN_DIR="$DEVFLOW_TEST_REPO"   # real checkout -> real config.default.yaml + personas
-  # Start each case from a clean bootstrap slate.
-  unset DEVFLOW_RUN_ENV DEVFLOW_REUSE_LAST_RUN REUSE RUN_DIR
-  rm -f "${TMPDIR:-/tmp}/devflow-last-run"
   export SB REPO_FX
 }
 
-# bootstrap_here: source A.1/A.2/A.3 with cwd = fixture repo. Leaves run.env sourced.
+# bootstrap_here: run the real script's bootstrap subcommand as a subprocess (cwd = fixture
+# repo), then source the resulting run.env into THIS shell for the case's own convenience —
+# the code under test never relies on that sourcing; it recomputes everything itself on
+# every subprocess call, exactly like a real agent invocation would.
 bootstrap_here(){
   cd "$REPO_FX" || return 1
-  # shellcheck disable=SC1090
-  . "$EXTRACTED/a1.sh"
-  . "$EXTRACTED/a2.sh"
-  . "$EXTRACTED/a3.sh"
+  local out
+  out="$(bash "$RUNNER" bootstrap)" || { echo "bootstrap failed: $out" >&2; return 1; }
+  RUN_DIR="$(printf '%s\n' "$out" | sed -n 's/^RUN_DIR=//p')"
+  set -a; . "$RUN_DIR/run.env"; set +a
+  export RUN_DIR
 }
 
-cleanup_sandbox(){ [ -n "${SB:-}" ] && rm -rf "$SB"; }
+# RUN_DIR now lives under ${TMPDIR:-/tmp}/devflow-run.<hash> — OUTSIDE $SB (unlike the
+# old in-repo `.devflow/run`, which `rm -rf "$SB"` cleaned up as a side effect). Remove it
+# explicitly so sandboxed test runs don't leak hashed run dirs into the real $TMPDIR.
+cleanup_sandbox(){ [ -n "${RUN_DIR:-}" ] && rm -rf "$RUN_DIR"; [ -n "${SB:-}" ] && rm -rf "$SB"; }

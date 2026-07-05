@@ -175,6 +175,10 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Deploy: copy source → ~/.codex/devflow/, then install from there
+#
+# scripts/devflow-runner.sh ships as a plain file under this tree — rsync -a below
+# copies it like any other file. It is always invoked as `bash "$RUNNER" ...`, never
+# executed directly, so no chmod +x step is needed here or anywhere else in this script.
 # ---------------------------------------------------------------------------
 
 do_deploy() {

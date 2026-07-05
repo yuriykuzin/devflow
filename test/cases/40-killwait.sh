@@ -4,8 +4,10 @@
 set -u
 . "$LIB/assert.sh"; . "$LIB/sandbox.sh"
 
-# Only the function definitions are needed (no bootstrap).
-. "$EXTRACTED/b.sh"
+mk_sandbox
+cd "$REPO_FX"
+# White-box: source the real script (guarded main means sourcing does not auto-dispatch).
+. "$RUNNER"
 
 # Child traps+ignores TERM, so a plain `kill; wait` would block indefinitely.
 bash -c 'trap "" TERM; sleep 30' &
@@ -20,4 +22,5 @@ if kill -0 "$pid" 2>/dev/null; then alive=1; else alive=0; fi
 is "$alive" "0" "SIGTERM-ignoring child is killed (escalated to -9)"
 ok "[ $dur -lt 7 ]" "kill_wait returns within bound (${dur}s), no unbounded hang"
 
+cleanup_sandbox
 report

@@ -47,32 +47,28 @@ See `config.default.yaml` for the full template.
 
 ## How Cross-Tool Calls Work
 
-Devflow calls external tools via their CLI in non-interactive mode. The **canonical
-procedure** — config caching, binary resolution, async launch, polling, session capture,
-scope pinning, and rate-limit fallback — lives in
-[`references/cross-tool-runner.md`](references/cross-tool-runner.md). All devflow skills
-delegate the mechanics there; below is just the shape.
+Devflow calls external tools via their CLI in non-interactive mode. The **mechanics** —
+config caching, binary resolution, async launch, polling, session capture, scope
+pinning, and rate-limit fallback — live in a real script, `scripts/devflow-runner.sh`,
+which every devflow skill calls as a subprocess:
 
 ```bash
-# codex — launched non-blocking (-c flags BEFORE exec; always < /dev/null), polled to completion
-nohup "$CODEX_BIN" -c "model_reasoning_effort=\"$REVIEWER_EFFORT\"" \
-  exec --full-auto --json -m "$REVIEWER_MODEL" -o "$OUT" \
-  "$PROMPT" < /dev/null > "$EVENTS" 2> "$STDERR" &
-# claude — claude -p --output-format json --permission-mode plan --model <m> --effort <e> "$PROMPT"
+bash "$RUNNER" bootstrap
+bash "$RUNNER" scope <mode> [flags]
+bash "$RUNNER" run-external --phase <name> --prompt-file <path> [flags]
 ```
 
-The orchestrating agent (you) launches the call in the background (Bash
-`run_in_background: true` on Claude Code, `nohup &` elsewhere), polls the event stream,
-and iterates. See the runner for the full async/poll/fallback logic — never hand-roll a
-one-off invocation.
+See [`references/cross-tool-runner.md`](references/cross-tool-runner.md) for the full
+subcommand reference, the locator snippet for `$RUNNER`, and the async-launch guidance
+per host. Never hand-roll a one-off `codex exec` / `claude -p` invocation — always go
+through `run-external`.
 
 ### Codex binary resolution
 
-`$CODEX_BIN` is resolved once during bootstrap (cross-tool-runner.md Section A): a bare
-`codex` can hit an NVM-shadowed old CLI lacking `--json`. Devflow picks the first
-candidate that passes `exec --help | grep --json` (preferring Homebrew
-`/opt/homebrew/bin/codex`), fails loudly if none qualify, and lets you force a path with
-`codex.command_path` in config. Always invoked with `< /dev/null` to avoid TTY blocks.
+`$CODEX_BIN` is resolved once during `bootstrap`: a bare `codex` can hit an
+NVM-shadowed old CLI lacking `--json`. Devflow picks the first candidate that passes
+`exec --help | grep --json` (preferring Homebrew `/opt/homebrew/bin/codex`), fails
+loudly if none qualify, and lets you force a path with `codex.command_path` in config.
 
 ## Model Tiers
 
@@ -96,7 +92,7 @@ When `<backend>.session_reuse: true` (default), devflow:
    - **claude**: `--resume <session_id>`
    - **codex**: `exec resume <session_id>` with the **same full flag shape** as a fresh
      call (`-c model_reasoning_effort` before `exec`, `--json`, `-m`, `< /dev/null`) —
-     see cross-tool-runner.md Section B
+     handled by `run-external --resume <id>`, see cross-tool-runner.md
 3. Passes sessions between phases (plan review → implementation review) via the shared `run.env`
 
 This saves ~20k tokens per resumed call.

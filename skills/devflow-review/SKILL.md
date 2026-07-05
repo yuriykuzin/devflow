@@ -24,25 +24,52 @@ Send existing code changes to an external AI tool for review. Standalone skill �
 
 ### Step 1: Bootstrap (config + personas + binary, once)
 
-Run **Section A** of `skills/using-devflow/references/cross-tool-runner.md`. It resolves
-the active backend, reviewer/implementer model+effort, `session_reuse`,
-`fallback_command`, personas, and the validated codex binary ONCE, freezing them into a
-per-run `run.env` (sourced for the rest of this skill). If a valid `run.env` already
-exists for this project it is reused; otherwise it re-bootstraps (no per-phase YAML
-re-reads). Standalone invocations get a fresh run dir by default.
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+```
+
+Resolves the active backend, reviewer/implementer model+effort, `session_reuse`,
+`fallback_command`, personas, and the validated codex binary ONCE, freezing them into
+`$RUN_DIR/run.env` — every later `bash "$RUNNER" ...` call loads it automatically. If a
+valid run already exists for this project it is reused (`REUSED=1`); otherwise it
+re-bootstraps (no per-phase YAML re-reads). Unlike the old `mktemp`-based runner,
+standalone invocations of this skill do NOT get a fresh run dir by default — `RUN_DIR` is
+deterministic per project, so a standalone `devflow:review` in a checkout that ran
+devflow before will reuse whatever `run.env`/session files are already there. If that's
+not what you want (old session, different reviewer settings you expect to re-resolve),
+run `bash "$RUNNER" bootstrap --fresh` first.
 
 ### Step 2: Determine Scope
 
 Ask the user what to review (or infer from context):
 
-| User says | What to collect |
-|-----------|----------------|
-| "review my changes" | `git diff HEAD` |
-| "review staged changes" | `git diff --cached` |
-| "review this PR" | `gh pr diff <number>` |
-| "review branch" | base resolved by cross-tool-runner.md Section C (PR base → origin/HEAD → main/master) |
-| "review file X" | `cat X` |
-| "review last commit" | `git show HEAD` |
+| User says | What to collect | `SCOPE_MODE` | `SCOPE_FLAGS` |
+|-----------|----------------|--------------|---------------|
+| "review my changes" | `git diff HEAD` | `uncommitted` | (none) |
+| "review staged changes" | `git diff --cached` | `staged` | (none) |
+| "review this PR" | `gh pr diff <number>` | `pr` | `--pr <number>` |
+| "review branch" | base resolved by `scope branch` (PR base → origin/HEAD → main/master) | `branch` | `--base <ref>` (optional — auto-resolved if omitted) |
+| "review file X" | `cat X` | `files` | `-- <path...>` |
+| "review last commit" | `git show HEAD` | `last-commit` | (none) |
+```
+
+The "Run the call" section below (Step 17) invokes `bash "$RUNNER" scope "$SCOPE_MODE" $SCOPE_FLAGS`
+directly, so this table is now the single source of truth for both columns — no separate
+mode/flag mapping lives anywhere else in this skill.
 
 Collect scope information to describe in the external prompt:
 ```bash
@@ -59,7 +86,7 @@ Launch both reviews simultaneously — they are independent and can run in paral
 Synthesize findings after both complete. Two axes of diversity: **personas × tools**.
 
 **Internal review** (multi-persona, runs as background sub-agents):
-1. Read persona definitions from `$PERSONAS_REF` (cached by Section A; falls back to `skills/devflow-review/references/review-personas.md` if unset)
+1. Read persona definitions from `$PERSONAS_REF` (cached by `bootstrap`; falls back to `skills/devflow-review/references/review-personas.md` if unset)
 2. Read `review_personas.personas` and `review_personas.persona_tiers` from config
 3. For each enabled persona, use the Agent tool to spawn a background sub-agent. Pass it:
    - The persona's review lens (from review-personas.md)
@@ -89,11 +116,12 @@ Both feed into Step 5 (Synthesis).
 ### Step 4: External Cross-Tool Review
 
 The mechanics — config values, codex binary, async launch, polling, session capture,
-scope pinning, and rate-limit fallback — are all handled by
-`skills/using-devflow/references/cross-tool-runner.md`. This step only builds the
-**prompt** and pins the **scope**; the runner does the rest. Artifact paths
-(`$OUT`, `$EVENTS`, `$SESSION_FILE`) come from `run.env`, namespaced under `$RUN_DIR`
-(no fixed `/tmp/devflow-*` paths — those collided across concurrent runs).
+scope pinning, and rate-limit fallback — are all handled by `scripts/devflow-runner.sh`
+(`bash "$RUNNER" scope ...` / `run-external ...`; see
+`skills/using-devflow/references/cross-tool-runner.md` for the full reference). This
+step only builds the **prompt** and picks the **scope mode**; the runner does the rest.
+Artifact paths are namespaced under `$RUN_DIR` (deterministic per project — no fixed
+`/tmp/devflow-*` paths, which collided across concurrent runs).
 
 #### Construct the external review prompt
 
@@ -102,11 +130,60 @@ diffs into prompt variables, let the tool explore the repo itself via git comman
 
 The external reviewer always gets the **single generalist prompt** (not multi-persona).
 This keeps external calls fast and cheap while internal sub-agents provide persona diversity.
+The prompt text is defined inline in the "Run the call" bash block below, not as a
+separate shell variable here — Claude Code resets shell state between every Bash tool
+call, so a `REVIEW_PROMPT="..."` assigned in its own code block would be empty by the
+time the next block reads it. Shown here for reference; this is the exact text used
+(fill in `<REVIEW FOCUS>` with the user-specified focus or `general` before writing it
+into the bash block):
 
 ```
+You are performing a code review of this repository. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file and run read-only verification (tests, linters, type-checkers, builds in check mode) to ground your findings; do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
+
+SCOPE: <output of `bash "$RUNNER" scope <mode>` for the mode in the table above — explicit diff command + in-scope file list; reviewer reviews ONLY that changeset>
+
+REVIEW FOCUS: <user-specified focus or 'general'>
+
+Read any files you need for context. Use git commands to explore changes.
+
+REVIEW CHECKLIST:
+1. BUGS — Logic errors, off-by-one, null handling, race conditions
+2. SECURITY — Input validation, injection, secrets, auth
+3. PERFORMANCE — N+1 queries, unnecessary allocations, missing indexes
+4. PATTERNS — Does the code follow project conventions?
+5. TESTING — Test coverage, edge cases, test quality
+6. READABILITY — Naming, structure, comments where needed
+
+For each issue: severity (critical/important/minor/nitpick), file:line, description, fix.
+End with: APPROVED or CHANGES_REQUESTED
+```
+
+**Note**: The old multi-persona external prompt is no longer used. Internal
+sub-agents handle persona diversity; external provides independent generalist review.
+When `review_personas.enabled: false`, both internal and external use this same
+generalist prompt (no persona sub-agents spawned).
+
+#### Run the call (both backends)
+
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
 REVIEW_PROMPT="You are performing a code review of this repository. READ-ONLY on the source tree — do not modify, create, or delete files. You may read any file and run read-only verification (tests, linters, type-checkers, builds in check mode) to ground your findings; do not use auto-fix / format-in-place / snapshot-update modes — the working tree must be unchanged when you finish.
 
-SCOPE: <built via cross-tool-runner.md Section C from the scope mode in the table above — explicit DIFF_CMD + in-scope file list; reviewer reviews ONLY that changeset>
+SCOPE: <output of \`bash \"\$RUNNER\" scope <mode>\` for the mode in the table above — explicit diff command + in-scope file list; reviewer reviews ONLY that changeset>
 
 REVIEW FOCUS: <user-specified focus or 'general'>
 
@@ -122,28 +199,27 @@ REVIEW CHECKLIST:
 
 For each issue: severity (critical/important/minor/nitpick), file:line, description, fix.
 End with: APPROVED or CHANGES_REQUESTED"
+bash "$RUNNER" scope "$SCOPE_MODE" $SCOPE_FLAGS > "$RUN_DIR/final-review-scope.txt"   # SCOPE_MODE/SCOPE_FLAGS from the Step 2 table
+printf '%s\n\n%s\n' "$(cat "$RUN_DIR/final-review-scope.txt")" "$REVIEW_PROMPT" > "$RUN_DIR/final-review-prompt.txt"
+RESUME_ID="$(cat "$RUN_DIR/final-review.session" 2>/dev/null)"
+if [ -n "$RESUME_ID" ]; then
+  bash "$RUNNER" run-external --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt" --resume "$RESUME_ID"
+else
+  bash "$RUNNER" run-external --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt"
+fi
 ```
 
-**Note**: The old multi-persona external prompt is no longer used. Internal
-sub-agents handle persona diversity; external provides independent generalist review.
-When `review_personas.enabled: false`, both internal and external use this same
-generalist prompt (no persona sub-agents spawned).
-
-#### Run the call (both backends)
-
-Run the external review via `skills/using-devflow/references/cross-tool-runner.md`:
-
-- **Scope** — build the SCOPE block with **Section C** (`SCOPE_MODE` from the Step 2
-  table: uncommitted / staged / pr / branch / files / last-commit).
-- **Invocation** — launch and poll with **Section B** (`PHASE=final-review`), reviewer
-  model/effort from `run.env`. First iteration = fresh session; later iterations =
-  resume `$SESSION_FILE` with the same full flag shape. The session captured here
-  persists for re-review.
-- **Fallback** — apply **Section D** after the call (rate-limit → one proxy retry;
+- **Scope** — `scope <mode>` (mode from the Step 2 table: uncommitted / staged / pr /
+  branch / files / last-commit).
+- **Invocation** — `run-external --phase final-review`. First iteration = fresh session;
+  later iterations = resume `final-review.session`. The session captured here persists
+  for re-review.
+- **Fallback** — folded into `run-external` automatically (rate-limit → one proxy retry;
   auth/capability failure → escalate, no proxy retry).
 
-The verdict is the last `agent_message` extracted by Section B (ends with `APPROVED` /
-`CHANGES_REQUESTED`).
+The verdict is `VERDICT_STATUS` from `run-external`'s stdout (`APPROVED` /
+`CHANGES_REQUESTED`); full text at `VERDICT_FILE`. If `VERDICT_STATUS=UNKNOWN`, do not
+treat it as pass or fail — read `VERDICT_FILE` directly and judge from the text.
 
 ### Step 5: Synthesize Reviews
 
@@ -201,29 +277,31 @@ Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`.
 
 **attended** — if the user asks to fix and re-review:
 1. Fix the critical/important issues
-2. Re-run Step 4 with the updated diff (resume existing session)
+2. Re-run Step 4 with the updated diff (resume existing session — `--resume "$(cat "$RUN_DIR/final-review.session")"`) 
 3. Repeat until APPROVED — no fixed cap. If the same blocking issues recur with no progress, surface them to the user instead of looping.
 
 **unattended** (e.g. Phase 3 of `devflow:run --unattended`) — no user to ask, but the APPROVED
 gate still stands. After fixing every CHANGES_REQUESTED finding:
 
-1. **Attempt external re-review first — always.** Resume the external session (Step 4, `RESUME_ID`
-   from `$SESSION_FILE`) and re-run until it returns APPROVED. Same no-fixed-cap /
-   stop-on-no-progress rule as attended: if the same blocking issues recur, record the unresolved
-   issues and leave the phase CHANGES_REQUESTED.
+1. **Attempt external re-review first — always.** Resume the external session (Step 4,
+   `--resume "$(cat "$RUN_DIR/final-review.session")"`) and re-run until it returns
+   APPROVED. Same no-fixed-cap / stop-on-no-progress rule as attended: if the same
+   blocking issues recur, record the unresolved issues and leave the phase
+   CHANGES_REQUESTED.
 2. **Verified-fixed without external re-review** — a fallback available ONLY when the external
    session is genuinely unreachable **and** every finding is mechanically verifiable:
    - **Unreachable** — one of the following, with the stated proof recorded (you may not declare
      unreachable without one of these):
-     - The resume attempt in step 1 actually ran and its Section D handler (`devflow_after_call`)
-       returned non-zero via any escalate path — rate-limit-after-fallback, auth/capability,
-       timeout (124), or unknown. **Proof:** the Section D stderr line. A lone timeout is often
-       transient — retry once before treating it as unreachable.
-     - No session id was ever captured, so resume is impossible (`[ ! -s "$SESSION_FILE" ]`) —
-       valid ONLY when the runner's `no session id captured` WARN was actually emitted on the
-       preceding external call. **Proof:** that WARN line. A `$SESSION_FILE` that held an id on an
-       earlier round and is now empty is a bug, not an unreachable session — escalate, do not
-       self-certify.
+     - The resume attempt in step 1 actually ran and `run-external` exited non-zero via
+       any escalate path — rate-limit-after-fallback, auth/capability, timeout (124), or
+       unknown. **Proof:** the `devflow:` stderr line `run-external` prints identifying
+       which branch fired. A lone timeout is often transient — retry once before treating
+       it as unreachable.
+     - No session id was ever captured, so resume is impossible
+       (`[ ! -s "$RUN_DIR/final-review.session" ]`) — valid ONLY when the runner's `no
+       session id captured` WARN was actually emitted on the preceding external call.
+       **Proof:** that WARN line. A session file that held an id on an earlier round and
+       is now empty is a bug, not an unreachable session — escalate, do not self-certify.
    - **Mechanically verifiable** — every fixed finding maps to a specific deterministic check (a
      named failing test, a compiler/type-checker error, a linter rule, or an exact
      catalog/reference mismatch) that fully covers the original finding. A test finding counts as
@@ -243,11 +321,31 @@ gate still stands. After fixing every CHANGES_REQUESTED finding:
 > verification recorded as above.
 
 **Implementation handoff**: If fixes are complex, resume the review session with
-**implementer** settings via cross-tool-runner.md **Section B** (resume `$SESSION_FILE`,
-swap `REVIEWER_*` → `IMPLEMENTER_*`, and set `PERMISSION_MODE=default` so the claude
-backend can write files — codex uses `--full-auto` regardless), prompt
-`"Fix the issues you found in your review."`
-Section D fallback applies here too.
+**implementer** settings:
+
+```bash
+if [ -z "${RUNNER:-}" ]; then
+  _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
+  if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
+    _real="$(cd ~/.agents/skills/devflow 2>/dev/null && pwd -P)"
+    [ -n "$_real" ] && [ -f "$_real/../scripts/devflow-runner.sh" ] && _found="$_real/../scripts/devflow-runner.sh"
+  fi
+  if [ -z "$_found" ]; then
+    echo "devflow: FATAL — could not locate scripts/devflow-runner.sh under ~/.claude/plugins, ~/.codex/devflow, or ~/.agents/skills/devflow." >&2
+    echo "  If this skill's invocation preamble showed a 'Base directory for this skill' path (<plugin-root>/skills/<skill-name>), use <that path>/../../scripts/devflow-runner.sh directly." >&2
+    exit 1
+  fi
+  RUNNER="$_found"
+fi
+BOOT="$(bash "$RUNNER" bootstrap)"
+RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+bash "$RUNNER" run-external --phase final-fix --role implementer --permission-mode default \
+  --resume "$(cat "$RUN_DIR/final-review.session")" --prompt-file "$RUN_DIR/final-fix-prompt.txt"
+```
+
+(`final-fix-prompt.txt` containing `"Fix the issues you found in your review."`;
+`--permission-mode default` only matters for claude — codex uses `--full-auto`
+regardless). The same rate-limit/auth fallback applies here too.
 
 ## Key Rules
 
