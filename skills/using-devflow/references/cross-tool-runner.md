@@ -3,19 +3,18 @@
 Canonical procedure for external-CLI calls (review, resume, implementer handoff).
 Referenced by `devflow:plan`, `devflow:implement`, `devflow:review`, and `devflow:run`.
 
-**Why this file is short:** the mechanics (config caching, binary resolution, async
-launch, polling, kill escalation, scope pinning, rate-limit fallback) live in a real
-script, `scripts/devflow-runner.sh`, not in markdown. Claude Code resets shell env and
-functions between every Bash tool call — only cwd and the filesystem persist — so
-transcribing bash out of a markdown file into Bash calls silently drops pieces (the
-rate-limit/auth fallback, mandatory session capture) on every phase transition. A script
-file you `bash` as a subprocess has no such problem: it recomputes its own state from
-disk on every invocation. This file now only covers what an agent must decide (locate
-the script, which subcommand, what prompt) — not how the subcommand works internally.
+**What lives in the script vs. what you do yourself.** The one thing that genuinely cannot
+live in markdown is supervising a long (8–10 min) backend CLI: launch it detached, poll it
+with backoff and a hard cap, kill the whole process group on timeout, fold in the
+rate-limit/auth fallback, and capture the session id. A single Bash tool-call can't do that
+(the host imposes its own short timeout, and Claude Code resets shell env + functions
+between calls). So that — and only that — is `scripts/devflow-runner.sh run-external`, plus
+a tiny `dir` helper for the run directory. **Config resolution and scope-pinning are your
+job now**, done with a read of `.devflow.yaml` and plain `git` — no subcommand for either.
 
-> **Rule:** EVERY external call in any devflow skill — fresh review, resume re-review,
-> and implementer handoff/fix — MUST go through `bash "$RUNNER" run-external`. Do not
-> hand-roll a one-off `codex exec` / `claude -p` invocation.
+> **Rule:** EVERY external call in any devflow skill — fresh review, resume re-review, and
+> implementer handoff/fix — MUST go through `bash "$RUNNER" run-external`. Do not hand-roll
+> a one-off `codex exec` / `claude -p` invocation.
 
 ## Locate the runner
 
@@ -23,16 +22,14 @@ the script, which subcommand, what prompt) — not how the subcommand works inte
 containing `config.default.yaml` and `skills/`). Resolve it once per skill invocation:
 
 ```bash
-# AGENT: on Claude Code, "Base directory for this skill" (shown in this skill's
-# invocation preamble) is <plugin-root>/skills/<skill-name> — two directories up is the
-# plugin root; prefer that when available. On other hosts, fall back to a filesystem
-# search under the actual install locations: ~/.claude/plugins (Claude Code marketplace +
-# plugin cache — both are full-tree rsync targets that include scripts/) and
+# AGENT: on Claude Code, "Base directory for this skill" (shown in this skill's invocation
+# preamble) is <plugin-root>/skills/<skill-name> — two directories up is the plugin root;
+# prefer that when available. On other hosts, fall back to a filesystem search under the
+# actual install locations: ~/.claude/plugins (Claude Code marketplace + plugin cache) and
 # ~/.codex/devflow (the codex deploy target). Codex's own ~/.agents/skills/devflow is
-# usually a symlink to just the plugin's skills/ dir — a `find` rooted there can never
-# reach a sibling scripts/, so it's resolved separately below (readlink to the real
-# skills/ dir, then check its sibling scripts/devflow-runner.sh directly) instead of
-# being added as a search root.
+# usually a symlink to just the plugin's skills/ dir — a `find` rooted there can never reach
+# a sibling scripts/, so it's resolved separately (readlink to the real skills/ dir, then
+# check its sibling scripts/devflow-runner.sh directly).
 if [ -z "${RUNNER:-}" ]; then
   _found="$(find ~/.claude/plugins ~/.codex/devflow -path '*/scripts/devflow-runner.sh' 2>/dev/null | head -1)"
   if [ -z "$_found" ] && [ -e ~/.agents/skills/devflow ]; then
@@ -48,196 +45,206 @@ if [ -z "${RUNNER:-}" ]; then
 fi
 ```
 
-In practice, just always invoke it as `bash "$RUNNER" <subcommand> ...` — the script
-does not need to be executable itself (`install.sh` never `chmod`s it; a plain `bash`
-invocation is enough). Re-run this locator snippet at the start of every skill's Step 1
-(inline it — don't assume `$RUNNER` survives from an earlier Bash call, since only cwd
+Always invoke it as `bash "$RUNNER" <subcommand> ...` — the script does not need to be
+executable (`install.sh` never `chmod`s it). Re-run this locator at the start of every
+skill's Step 1 (inline it — `$RUNNER` does not survive from an earlier Bash call; only cwd
 and the filesystem do).
 
 ## RUN_DIR is deterministic
 
-Every subcommand derives `RUN_DIR` the same way — a hash of `git rev-parse
---show-toplevel`, rooted under `${TMPDIR:-/tmp}` rather than inside the repo tree (a
-tracked, clone-delivered `run.env` at a predictable in-repo path would be a same-day
-RCE — see "Security" below). It never depends on an exported env var or a `mktemp`
-pointer file, so any subcommand call reconstructs it identically with no shared state.
-
-Unlike the old in-repo `<project-root>/.devflow/run` path, this is a hash, not something
-you can hand-recompute correctly in a one-liner (matching the script's exact hash-tool
-fallback chain byte-for-byte is a maintenance trap waiting to drift). When *you* — the
-agent — need `$RUN_DIR` in a fresh Bash call, get it from `bootstrap`'s own stdout
-instead of recomputing it:
+`RUN_DIR` is a hash of `git rev-parse --show-toplevel`, rooted under `${TMPDIR:-/tmp}` — not
+inside the repo tree (a tracked, clone-delivered file at a predictable in-repo path would be
+a same-day RCE — see "Security"). It never depends on an exported env var or a `mktemp`
+pointer, so every subcommand reconstructs it identically with no shared state. It's a hash,
+not something to hand-recompute in a one-liner (matching the script's hash-tool fallback
+chain byte-for-byte is a drift trap). When *you* need `$RUN_DIR` in a fresh Bash call, get
+it from `dir`:
 
 ```bash
-BOOT="$(bash "$RUNNER" bootstrap)"
-RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 ```
 
-`bootstrap` is idempotent and cheap when reused (`REUSED=1`, no YAML re-read), so calling
-it again purely to recover `$RUN_DIR` in a later Bash call costs nothing beyond one
-subprocess launch.
+`RUN_DIR` is also your scratch store across Bash calls. Env vars don't survive between Bash
+tool-calls, but `RUN_DIR` and its files do — so a value one step computes and a later step
+needs (the pre-implementation commit, the plan path) goes in a file there, e.g.
+`printf '%s\n' "$SHA" > "$RUN_DIR/impl-base"` then `cat "$RUN_DIR/impl-base"` later. Session
+ids work the same way — `run-external` writes `$RUN_DIR/<phase>.session` for you.
 
 ## Subcommands
 
-### `bootstrap [--fresh]`
+### `dir [--fresh]`
 
-Resolves config + personas + backend binary once per (project, plugin) pair and freezes
-them into `$RUN_DIR/run.env`. Safe to call at the start of every phase — it reuses the
-existing `run.env` when the project/plugin/config fingerprint are unchanged, and only
-re-reads YAML when something changed. `--fresh` forces a rebuild (deletes the run
-directory first).
-
-```bash
-bash "$RUNNER" bootstrap
-# stdout: RUN_DIR=<path>
-#         REUSED=0|1
-```
-
-Values frozen into `run.env` (loaded automatically by every later subcommand call — you
-do not need to `source` it yourself for the *script* to see them): `BACKEND`,
-`REVIEWER_MODEL`, `REVIEWER_EFFORT`, `IMPLEMENTER_MODEL`, `IMPLEMENTER_EFFORT`,
-`SESSION_REUSE`, `FALLBACK_COMMAND`, `CODEX_BIN`, `CLAUDE_BIN`, `PERSONAS_REF`,
-`DEVFLOW_PLAN_PATH`, `PLAN_SESSION_FILE`, `DEVFLOW_PLUGIN_DIR`, `DEVFLOW_PROJECT_ROOT`,
-`DEVFLOW_CFG_FINGERPRINT`. If *you* (the agent) need one of these values in your own
-shell — e.g. `DEVFLOW_PLAN_PATH` — sourcing the file for read access within a single Bash
-call is safe (it's plain `KEY=VALUE` assignments); it just never needs to *survive* to
-the next call:
+Prints `RUN_DIR=<path>` for this project (created 0700, owned by you, never a symlink).
+`--fresh` wipes the directory first, to start a clean run — clearing a prior feature's phase
+session files so they aren't silently resumed. `--fresh` refuses (non-zero, `refusing to
+wipe`) while another devflow run is still in flight in the same `RUN_DIR`, so it can never
+pull the rug out from under a live call.
 
 ```bash
-set -a; . "$RUN_DIR/run.env"; set +a
-echo "$DEVFLOW_PLAN_PATH"
+bash "$RUNNER" dir            # RUN_DIR=<path>
+bash "$RUNNER" dir --fresh    # wipe + recreate, then RUN_DIR=<path>
 ```
 
-If `bootstrap` fails (no codex binary supports `exec --json`, no `claude` on PATH, or
-PyYAML unavailable), it prints a `devflow: FATAL —` line explaining the fix and exits
-non-zero. Surface that message to the user; do not silently retry.
+Use `--fresh` when starting an unrelated feature in a checkout that already has an old run,
+or when a `--resume` fails because the session id is gone/expired — rather than debugging a
+stale-session error.
 
-**Standalone invocations and `--fresh`:** `RUN_DIR` is keyed only on the project root, so
-if you invoke a devflow skill standalone (not via `devflow:run`) weeks after a previous
-run in the same checkout, `bootstrap` may reuse a `run.env` whose session files
-(`plan-review.session`, `final-review.session`, ...) point at long-expired external-tool
-sessions. The config-fingerprint check catches *config* drift, not *time* drift. If a
-`--resume` call fails because the session id is gone/expired, or you know you're starting
-an unrelated review in an old checkout, pass `bootstrap --fresh` to force a clean
-`RUN_DIR` rather than debugging a stale-session error.
+### `run-external --backend <b> --model <m> --effort <e> --phase <p> --prompt-file <f> [flags]`
 
-### `scope <mode> [flags]`
-
-Builds the SCOPE block for the requested changeset and prints it to stdout — prepend it
-verbatim to the review/plan prompt you write to `--prompt-file`.
-
-| Mode | Flags | Notes |
-|------|-------|-------|
-| `uncommitted` | — | `git diff HEAD` |
-| `staged` | — | `git diff --cached` |
-| `last-commit` | — | needs a parent commit |
-| `implementation` | `--impl-base <sha>` | diff since the pre-implementation commit |
-| `branch` | `--base <ref>` (optional) | PR base → origin/HEAD → main/master, in that order |
-| `pr` | `--pr <number>` | via `gh pr diff` |
-| `files` | `-- <path> [<path> ...]` | explicit file list |
-| `plan` | `--plan-path <path>` (or `$DEVFLOW_PLAN_PATH`) | read-only, reviews the plan file itself |
-
-```bash
-bash "$RUNNER" scope uncommitted
-bash "$RUNNER" scope implementation --impl-base "$DEVFLOW_IMPL_BASE"
-bash "$RUNNER" scope branch --base origin/main
-bash "$RUNNER" scope files -- src/foo.py src/bar.py
-```
-
-A mode that can't resolve its base (no origin remote, invalid `--impl-base`, no `HEAD^`,
-no common ancestor) fails loudly with a non-zero exit and an explanatory stderr line —
-never emits an empty scope. Treat a non-zero exit here as a hard stop, not something to
-paper over with a wider or empty scope.
-
-### `run-external --phase <name> --prompt-file <path> [flags]`
-
-Launches the external call (non-blocking internally — the script polls its own child
-with backoff and a hard cap; it returns only when the call is done, killed, or timed
-out), extracts the verdict text and session id, and prints a small `KEY=VALUE` report.
+Launches the external call (non-blocking internally — the script polls its own child with
+backoff and a hard cap; it returns only when the call is done, killed, or timed out),
+extracts the verdict text and session id, and prints a small `KEY=VALUE` report.
 
 | Flag | Required | Meaning |
 |------|----------|---------|
+| `--backend codex\|claude` | yes | which CLI to drive — from `.devflow.yaml` (see below) |
+| `--model <name>` | yes | the model for this role — from config |
+| `--effort <level>` | yes | reasoning effort for this role — from config |
 | `--phase <name>` | yes | `plan-review` \| `impl-review` \| `final-review` \| etc. — namespaces the output files under `$RUN_DIR` |
-| `--prompt-file <path>` | yes | the full prompt (SCOPE block + review instructions), written to a file first — never pass it inline, shell-quoting a multi-KB prompt is a footgun |
-| `--role reviewer\|implementer` | no (default `reviewer`) | picks `REVIEWER_*` vs `IMPLEMENTER_*` model/effort from `run.env` |
+| `--prompt-file <path>` | yes | the full prompt (SCOPE block + review instructions), written to a file first — never inline; shell-quoting a multi-KB prompt is a footgun |
+| `--role reviewer\|implementer` | no (default `reviewer`) | `reviewer` runs the backend read-only; `implementer` gets workspace-write. This alone sets the write posture — the runner derives it (claude `--permission-mode plan`/`default`, codex read-only/`--full-auto`); there is no separate permission flag. Does NOT pick the model — you pass that explicitly |
 | `--resume <session-id>` | no | resume that session instead of starting fresh |
-| `--permission-mode <mode>` | no (default `plan`) | `plan` for review, `default` for implementer handoff (claude backend only) |
 | `--no-session-reuse` | no | ephemeral call — no session persisted |
 
+The binary that actually runs (and the rate-limit `fallback_command`) is resolved by the
+script itself from the trusted config only — you never pass a binary path. `--model` /
+`--effort` / `--backend` are not exec-path keys, so you supply them from config.
+
 ```bash
-printf '%s\n' "$SCOPE_BLOCK" "$REVIEW_INSTRUCTIONS" > "$RUN_DIR/prompt.txt"
-bash "$RUNNER" run-external --phase plan-review --prompt-file "$RUN_DIR/prompt.txt"
+printf '%s\n\n%s\n' "$SCOPE_BLOCK" "$REVIEW_INSTRUCTIONS" > "$RUN_DIR/prompt.txt"
+bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
+  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt"
 # stdout:
 #   RUN_DIR=<path>
 #   PHASE=plan-review
-#   EXIT=<codex/claude process exit code, or 124 on a hard-cap/lingering kill>
+#   EXIT=<backend process exit code, or 124 on a hard-cap kill (poll schedule exhausted with no completion)>
 #   VERDICT_FILE=<path to the full verdict text>
-#   VERDICT_STATUS=APPROVED|ISSUES|CHANGES_REQUESTED|UNKNOWN
 #   SESSION_ID=<id, or empty>
 #   SESSION_FILE=<path — read this to resume next iteration>
 ```
 
-`VERDICT_STATUS=UNKNOWN` means none of the three known tokens appeared anywhere in the
-verdict text (the external tool didn't follow the requested response format) — **do not
-treat UNKNOWN as a silent pass or fail**. Read `VERDICT_FILE` yourself and decide from the
-actual text before proceeding.
+There is deliberately **no machine-parsed verdict status**. You are the orchestrator (an
+LLM) — read `VERDICT_FILE` and decide from the actual text whether it is an approval or asks
+for changes. A bash token classifier would just be a second, more brittle decision on the
+same prose. `EXIT` is the only mechanical signal: `0` = the call completed and `VERDICT_FILE`
+holds the reviewer's answer; `124` = the call was killed at the hard cap (infra failure — no
+usable verdict), so retry or surface it, don't read it as a rejection.
 
-`run-external` folds in the old rate-limit/auth fallback automatically: a transient rate
-limit retries once via `fallback_command` (new session id); an auth/capability failure
-(bad login, missing `--json`, empty event stream) escalates immediately without burning
-a retry. Either way, `run-external` exits non-zero and prints a `devflow:` stderr line
-explaining which branch fired — read stderr, not just the exit code, before deciding how
-to escalate to the user.
+`run-external` folds in the rate-limit/auth fallback automatically: a transient rate limit
+retries once via `fallback_command` (new session id); an auth/capability failure (bad login,
+missing `--json`, empty event stream) escalates immediately without burning a retry. On any
+escalation outcome (the fallback retry also failed, or an auth/capability failure) it exits
+non-zero and prints a `devflow:` stderr line saying which branch fired; a **successful**
+fallback retry exits `0` with a usable verdict and a fresh session id. Read stderr, not just
+the exit code, before escalating to the user.
 
-**Session capture is automatic and mandatory** — `SESSION_FILE` is written on every call,
-including calls that turn out to be the last one in a phase. Read it with
-`cat "$SESSION_FILE"` and pass its content as `--resume` on the next iteration; this is
-what keeps the fix → re-review loop cheap (~20k tokens saved per resumed call) instead of
+**Session capture is automatic and mandatory** — `SESSION_FILE` is written on every call.
+Read it with `cat "$SESSION_FILE"` and pass its content as `--resume` next iteration; this
+keeps the fix → re-review loop cheap (~20k tokens saved per resumed call) instead of
 degrading to a fresh, context-less review.
+
+## Config: what to read, and pass as flags
+
+Read the merged config once at the start of a skill and carry the values into your
+`run-external` flags. There is no config subcommand — you merge three layers directly, each
+overriding the next: **`.devflow.yaml`** (project root) → **`~/.devflow/config.yaml`**
+(global; the recommended install copies `config.default.yaml` here) → the plugin's
+**`config.default.yaml`** (built-in defaults). For any key, the first layer that sets it
+wins; don't skip the global layer, or a user's global `backend:`/`model:` is silently ignored
+on a project with no `.devflow.yaml`. From the merged result:
+
+- `backend` (`codex` | `claude`) → `--backend`
+- for that backend, the **reviewer** or **implementer** block's `model` + `effort` →
+  `--model` / `--effort` (reviewer for review calls, implementer for handoff/fix calls)
+- `session_reuse: false` → add `--no-session-reuse`
+- `output_dir` (default `docs/devflow/reports`) → where plans/reports are saved; if it's
+  under `docs/superpowers` (untracked-unsafe), fall back to writing plans under `$RUN_DIR`
+
+`command_path` / `fallback_command` are the exception — you never read or pass those; the
+script resolves them itself from the trusted files (see Security).
+
+## Scope: pin the review to one changeset (plain git)
+
+Prepend a SCOPE block to the review prompt so the reviewer inspects ONLY the intended
+changeset. Build it from the file list for the mode you need:
+
+| Mode | Files | Diff command to cite in the block |
+|------|-------|-----------------------------------|
+| uncommitted | `git diff --name-only HEAD` | `git diff HEAD -- <files>` |
+| staged | `git diff --cached --name-only` | `git diff --cached -- <files>` |
+| last-commit | `git diff --name-only HEAD^ HEAD` | `git show HEAD` |
+| implementation | `git diff --name-only "$BASE"` | `git diff "$BASE" -- <files>` |
+| branch | `git diff --name-only "$MB" HEAD` | `git diff "$MB"..HEAD -- <files>` |
+| pr | `gh pr diff <n> --name-only` | `gh pr diff <n>` |
+| files | the explicit paths | `git diff HEAD -- <those paths>` |
+| plan | the plan file path | `(read-only) cat <plan-path>` |
+
+Also list untracked files: `git ls-files --others --exclude-standard`.
+
+**Guard, don't paper over — a mode that can't resolve its base must STOP, never emit an
+empty scope** (an empty scope silently reviews nothing):
+- `implementation`: `BASE` is the pre-implementation commit (read `$RUN_DIR/impl-base`).
+  Verify it first — `git rev-parse --verify -q "$BASE^{commit}"` — and abort if invalid.
+- `last-commit`: abort if `git rev-parse --verify -q HEAD^` fails (single-commit repo).
+- `branch`: resolve `MB` as `git merge-base HEAD "$BASE"`, where `$BASE` is, in order:
+  a `BASE` you already set (e.g. from a `--base` the user gave) → `git symbolic-ref --short
+  refs/remotes/origin/HEAD` (the remote's default branch) → `origin/main`. Abort if
+  `merge-base` is empty (shallow clone / unrelated histories). (To review a PR against its
+  own base, use `pr` mode, which resolves the base via `gh`.)
+- `pr`: abort if `gh pr diff <n>` fails (auth/network/bad number).
+
+Example SCOPE block:
+
+```
+SCOPE: Review ONLY this changeset. Inspect it with: git diff HEAD -- <files>
+Files in scope:
+<the file list + any untracked files>
+Anything outside this changeset -> list under OUT_OF_SCOPE and do NOT block on it.
+```
 
 ## Security
 
-`RUN_DIR` lives under `${TMPDIR:-/tmp}`, not inside the repo — a hostile clone must never
-be able to *deliver* a tracked `run.env`/`config.env` into a path the script later
-sources. Every subcommand additionally refuses to source `run.env` (and refuses to trust
-an already-loaded one, via `devflow_require_valid_env` in `scope`/`run-external`) unless
-it's owned by the current user, not group/other-writable, and not a symlink. `RUN_DIR`
-itself is created with mode 0700 and an ownership check before anything touches it,
-closing the predictable-shared-`/tmp`-path pre-planting attack.
+`RUN_DIR` lives under `${TMPDIR:-/tmp}`, not inside the repo — a hostile clone must never be
+able to *deliver* a tracked file into a path the script later reads. `RUN_DIR` is created
+mode 0700 with an ownership + symlink check before anything touches it, closing the
+predictable-shared-`/tmp`-path pre-planting attack.
 
 `codex.command_path` and `codex.fallback_command` — the two config keys that name an
 executable to run — are resolved **only** from the plugin default and
-`~/.devflow/config.yaml`, never from a project-level `.devflow.yaml`. A committed project
-config choosing `backend`/models/`session_reuse` is fine; a committed project config
-choosing *which binary gets executed* is not — that's a clone shipping its own payload
-and pointing devflow at it.
+`~/.devflow/config.yaml`, never from a project-level `.devflow.yaml`, and only inside the
+script (never via a flag you pass). A committed project config choosing `backend` / models /
+`session_reuse` is fine; a committed project config choosing *which binary gets executed* is
+not — that's a clone shipping its own payload and pointing devflow at it.
 
 ## Async execution — how to launch `run-external`
 
-The script's own poll loop already respects `DEVFLOW_POLL_SCHEDULE`/an ~8-10min hard cap
-internally; you never need an outer poll loop of your own. What you choose is only *how
-you launch the one call*:
+The script's own poll loop already respects `DEVFLOW_POLL_SCHEDULE` / an ~8–10min hard cap
+internally; you never need an outer poll loop. You only choose *how you launch the one call*:
 
-- **Claude Code**: launch with the Bash tool's `run_in_background: true`. You get a
-  single completion notification when it's done; read the output at that point. Do not
-  poll with repeated foreground Bash calls — cwd persists between them but each call
-  still pays tool-call overhead for nothing, since the script's internal poll loop is
-  already doing the waiting.
-- **Other hosts (Windsurf/Gemini/Cursor/Codex-as-host)**: a plain foreground/blocking
-  call to `bash "$RUNNER" run-external ...` is fine — the script backgrounds its own
-  `codex`/`claude` child internally regardless of how it itself was launched; only the
-  *host's* invocation of the script needs to not impose its own short timeout on top.
+- **Claude Code**: launch with the Bash tool's `run_in_background: true`. You get one
+  completion notification; read the output then. Do not poll with repeated foreground Bash
+  calls — the script's internal poll loop is already doing the waiting.
+- **Other hosts (Gemini/Cursor/Codex-as-host)**: a plain foreground/blocking call
+  is fine — the script backgrounds its own `codex`/`claude` child internally regardless of
+  how it was launched; only the *host's* invocation must not impose its own short timeout.
 
 ## Putting it together (per phase)
 
 ```bash
-BOOT="$(bash "$RUNNER" bootstrap)"
-RUN_DIR="$(printf '%s\n' "$BOOT" | sed -n 's/^RUN_DIR=//p')"
-bash "$RUNNER" scope plan > "$RUN_DIR/scope.txt"
-printf '%s\n\n%s\n' "$(cat "$RUN_DIR/scope.txt")" "$REVIEW_PROMPT_BODY" > "$RUN_DIR/prompt.txt"
-bash "$RUNNER" run-external --phase plan-review --prompt-file "$RUN_DIR/prompt.txt"
+# 1) locate $RUNNER (snippet above), then:
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 
-# read results
-cat "$RUN_DIR/plan-review-verdict.txt"                          # full text
-RESUME_ID="$(cat "$RUN_DIR/plan-review.session" 2>/dev/null)"   # for the next iteration
+# 2) read config from .devflow.yaml -> BACKEND / MODEL / EFFORT (reviewer block here)
+
+# 3) build the SCOPE block from plain git (mode table above)
+#    ... assemble "$SCOPE_BLOCK" ...
+
+# 4) write the prompt and make the call
+printf '%s\n\n%s\n' "$SCOPE_BLOCK" "$REVIEW_PROMPT_BODY" > "$RUN_DIR/prompt.txt"
+RESUME_ID="$(cat "$RUN_DIR/plan-review.session" 2>/dev/null)"   # empty on first iteration
+bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
+  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt" ${RESUME_ID:+--resume "$RESUME_ID"}
+
+# 5) read results
+cat "$RUN_DIR/plan-review-verdict.txt"    # full verdict text
 ```

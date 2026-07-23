@@ -97,20 +97,18 @@ do_choose() {
 integrations:
   codex: true
   claude-code: true
-  windsurf: true
   # cursor: true
   # gemini: true
 EOF
   fi
 
-  local tools=("codex" "claude-code" "windsurf")
-  local labels=("Codex CLI" "Claude Code" "Windsurf")
+  local tools=("codex" "claude-code")
+  local labels=("Codex CLI" "Claude Code")
   local detected=()
 
   # Detect available tools
   command -v codex >/dev/null 2>&1 && detected+=("codex") || true
   [ -d "$HOME/.claude" ] && detected+=("claude-code") || true
-  [ -d "$HOME/.codeium/windsurf" ] && detected+=("windsurf") || true
 
   echo "Available tools:"
   echo ""
@@ -201,7 +199,6 @@ do_deploy() {
 
   # Remove old installations so re-install points to INSTALL_DIR
   rm -f "$HOME/.agents/skills/devflow"
-  rm -f "$HOME/.codeium/windsurf/windsurf/workflows"/devflow-*.md 2>/dev/null || true
   rm -rf "$HOME/.claude/plugins/cache/$CLAUDE_MKT/devflow" 2>/dev/null || true
 
   DEVFLOW_HOME="$INSTALL_DIR"
@@ -268,26 +265,7 @@ do_install() {
     echo "  · skipped (disabled in config)"
   fi
 
-  # 2. Windsurf
-  echo "Windsurf:"
-  if integration_enabled "windsurf"; then
-    local windsurf_dir="$HOME/.codeium/windsurf/windsurf/workflows"
-    if [ -d "$HOME/.codeium/windsurf" ]; then
-      mkdir -p "$windsurf_dir"
-      for wf in "$DEVFLOW_HOME"/windsurf/devflow-*.md; do
-        [ -f "$wf" ] || continue
-        local name
-        name="$(basename "$wf")"
-        symlink_or_skip "$wf" "$windsurf_dir/$name" "$name"
-      done
-    else
-      echo "  · not detected — skipped"
-    fi
-  else
-    echo "  · skipped (disabled in config)"
-  fi
-
-  # 3. Claude Code — proper marketplace-based installation
+  # 2. Claude Code — proper marketplace-based installation
   #    Creates a local marketplace with marketplace.json, copies plugin
   #    to cache, and registers in installed_plugins.json + settings.json.
   echo "Claude Code:"
@@ -395,15 +373,15 @@ else:
     echo "  · skipped (disabled in config)"
   fi
 
-  # 4. Cursor
+  # 3. Cursor
   echo "Cursor:"
   echo "  ✓ reads from $DEVFLOW_HOME directly (no setup needed)"
 
-  # 5. Gemini CLI
+  # 4. Gemini CLI
   echo "Gemini CLI:"
   echo "  ✓ reads from $DEVFLOW_HOME directly (no setup needed)"
 
-  # 6. Config
+  # 5. Config
   echo "Config:"
   if [ ! -f "$HOME/.devflow/config.yaml" ]; then
     mkdir -p "$HOME/.devflow"
@@ -429,13 +407,6 @@ do_uninstall() {
   [ -L "$HOME/.agents/skills/devflow" ] && rm "$HOME/.agents/skills/devflow" \
     && echo "  ✓ removed Codex symlink" \
     || echo "  · Codex: not installed"
-
-  # Windsurf
-  local wf_found=0
-  for wf in "$HOME/.codeium/windsurf/windsurf/workflows"/devflow-*.md; do
-    [ -L "$wf" ] && rm "$wf" && echo "  ✓ removed $(basename "$wf")" && wf_found=1
-  done
-  [ "$wf_found" = "0" ] && echo "  · Windsurf: not installed"
 
   # Claude Code — remove marketplace, cache, and registrations
   local mkt_dir="$HOME/.claude/plugins/marketplaces/$CLAUDE_MKT"
@@ -499,18 +470,6 @@ do_status() {
     echo "  ✓ Codex:       $(readlink "$HOME/.agents/skills/devflow")"
   else
     echo "  ✗ Codex:       not installed"
-  fi
-
-  # Windsurf
-  local wf_dir="$HOME/.codeium/windsurf/windsurf/workflows"
-  if [ -d "$HOME/.codeium/windsurf" ]; then
-    local found=0
-    for wf in "$wf_dir"/devflow-*.md; do
-      [ -L "$wf" ] && found=$((found + 1))
-    done
-    echo "  ✓ Windsurf:    $found workflow(s) in $wf_dir"
-  else
-    echo "  · Windsurf:    not detected"
   fi
 
   # Claude Code

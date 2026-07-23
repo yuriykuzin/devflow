@@ -3,3 +3,9 @@
 *.swo
 *~
 .devflow/
+__pycache__/
+*.pyc
+
+# Local dev plans / specs — keep out of the public repo (see feedback: never commit plans)
+docs/superpowers/
+docs/devflow/reports/plans/

@@ -11,29 +11,16 @@ backend: claude              # codex | claude
 # Backend: claude (Claude Code CLI)
 # ──────────────────────────────────────────────────────────────
 claude:
-  # `command`/`flags` below are illustrative — they document the invocation devflow builds
-  # internally (see skills/using-devflow/references/cross-tool-runner.md), not live knobs.
+  # Only model/effort/session_reuse are live knobs. The CLI invocation itself (flags, headless
+  # mode, session capture, read-only vs write posture) is built by the runner — see the canonical
+  # procedure in skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
-    command: "claude"
-    flags: "-p --output-format json --permission-mode plan"
     model: "opus"                    # alias: opus → claude-opus-4-6
     effort: "max"                    # --effort max (thorough reviews)
   implementer:
-    command: "claude"
-    flags: "-p --output-format json --permission-mode default"
     model: "sonnet"                  # alias: sonnet → claude-sonnet-4-6
     effort: "high"                   # --effort high (fast implementation)
   session_reuse: true
-  # Protocol notes:
-  #   Headless mode:    -p (print mode, non-interactive)
-  #   Model:            --model <alias|full-name>
-  #   Effort:           --effort <low|medium|high|max>
-  #   JSON output:      --output-format json
-  #   Session capture:  jq -r '.session_id' from JSON output
-  #   Session resume:   claude -p --resume <session_id>
-  #   Read-only review: --permission-mode plan (no file writes)
-  #   Full access:      --permission-mode default
-  #   Tool restrict:    --allowedTools "Read Grep Glob"
 
 # ──────────────────────────────────────────────────────────────
 # Backend: codex (Codex CLI)
@@ -45,16 +32,13 @@ codex:
   # --json and needs TTY auth. Set an absolute path to force a specific binary; devflow
   # fails loudly if no candidate supports `exec --json`.
   command_path: ""
-  # `command`/`flags` below are illustrative — they document the invocation devflow builds
-  # internally (see skills/using-devflow/references/cross-tool-runner.md), not live knobs.
+  # Only model/effort/session_reuse (and the two exec-path keys command_path/fallback_command)
+  # are live knobs. The CLI invocation itself is built by the runner — see the canonical
+  # procedure in skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
-    command: "codex exec"
-    flags: "--full-auto"
     model: "gpt-5.5"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   implementer:
-    command: "codex exec"
-    flags: "--full-auto"
     model: "gpt-5.5"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   session_reuse: true
@@ -63,14 +47,6 @@ codex:
   # through a local proxy with its own API key / rate limit pool).
   # Comment out or set to "" to disable fallback (fail immediately).
   fallback_command: "codex-local-proxy"
-  # Protocol notes:
-  #   Headless mode:    --full-auto
-  #   Model:            -m <model>
-  #   Effort:           -c 'model_reasoning_effort="<effort>"' (NOT --effort)
-  #   JSON output:      --json (JSONL events on stdout)
-  #   Session capture:  head -1 events.jsonl | jq -r '.thread_id'
-  #   Session resume:   codex exec resume <session_id>
-  #   Output file:      -o <path>
 
 # ──────────────────────────────────────────────────────────────
 # Shared settings (apply regardless of backend)
@@ -134,6 +110,5 @@ review_personas:
 integrations:
   codex: true
   claude-code: true
-  windsurf: true
   # cursor: true       # auto-detected from repo — no install step needed
   # gemini: true       # auto-detected from repo — no install step needed

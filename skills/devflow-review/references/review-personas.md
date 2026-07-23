@@ -167,7 +167,7 @@ End with: APPROVED (no critical/important issues) or CHANGES_REQUESTED
 
 ## Graceful Degradation
 
-If the host agent cannot spawn real sub-agents (e.g., Windsurf, Gemini), it should
+If the host agent cannot spawn real sub-agents (e.g., Gemini), it should
 simulate the perspectives sequentially. The prompt is
 designed to work in both modes — real parallel sub-agents or sequential simulation.
 

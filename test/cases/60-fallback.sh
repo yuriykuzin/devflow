@@ -6,12 +6,13 @@ export DEVFLOW_POLL_SCHEDULE="1 1 1 1 1 1"
 . "$LIB/assert.sh"; . "$LIB/sandbox.sh"
 
 mk_sandbox
-bootstrap_here
+cd "$REPO_FX"
 # White-box: source the real script for devflow_run_external/devflow_after_call (guarded
-# main means sourcing does not auto-dispatch).
+# main means sourcing does not auto-dispatch). Sourcing sets + secures RUN_DIR for the repo.
 . "$RUNNER"
 
-PHASE="final-review"; MODEL="$REVIEWER_MODEL"; EFFORT="$REVIEWER_EFFORT"; PROMPT="review"
+# Values a run-external call would have received as flags (no run.env to source them from).
+BACKEND="codex"; PHASE="final-review"; MODEL="gpt-5.5"; EFFORT="high"; PROMPT="review"
 CRAFT_ERR="$SB/craft.stderr"; CRAFT_EV="$SB/craft.events"
 printf '{"type":"turn.completed"}\n' > "$CRAFT_EV"
 

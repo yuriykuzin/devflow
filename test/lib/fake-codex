@@ -29,8 +29,13 @@ done
 is_resume=0
 case "$joined" in *" exec resume "*) is_resume=1 ;; esac
 
+# Record which write-posture the runner asked for, so tests can assert reviewers stay
+# read-only and only implementers get workspace-write.
+ro=0; case "$joined" in *'sandbox_mode="read-only"'*) ro=1 ;; esac
+fa=0; case "$joined" in *" --full-auto "*) fa=1 ;; esac
+
 MODE="${FAKE_CODEX_MODE:-ok}"
-[ -n "${FAKE_CODEX_LOG:-}" ] && printf '%s|resume=%s\n' "$MODE" "$is_resume" >> "$FAKE_CODEX_LOG"
+[ -n "${FAKE_CODEX_LOG:-}" ] && printf '%s|resume=%s|ro=%s|fa=%s\n' "$MODE" "$is_resume" "$ro" "$fa" >> "$FAKE_CODEX_LOG"
 
 emit_ok() {
   local text="${FAKE_CODEX_VERDICT:-Reviewed the change. No blocking issues found. APPROVED}"

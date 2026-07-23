@@ -30,14 +30,6 @@ ln -s ~/.codex/devflow/skills ~/.agents/skills/devflow
 
 **Cursor** — no setup needed. Cursor reads `.cursor-plugin/plugin.json` from the repo.
 
-**Windsurf** — symlink workflow files:
-```bash
-mkdir -p ~/.codeium/windsurf/windsurf/workflows
-for f in ~/.codex/devflow/windsurf/devflow-*.md; do
-  ln -sf "$f" ~/.codeium/windsurf/windsurf/workflows/
-done
-```
-
 **Gemini CLI** — reads `GEMINI.md` and `gemini-extension.json` from the repo directly.
 
 ### 3. Create config (optional)
@@ -65,14 +57,13 @@ ls ~/.devflow/config.yaml             # Config exists
 cd ~/.codex/devflow && git pull
 ```
 
-Codex, Windsurf, Cursor, and Gemini use symlinks/direct reads — changes propagate instantly.
+Codex, Cursor, and Gemini use symlinks/direct reads — changes propagate instantly.
 Claude Code uses a cached copy — re-run `install.sh` after `git pull` to update the cache.
 
 ## Uninstalling
 
 ```bash
 rm ~/.agents/skills/devflow                                          # Codex
-rm ~/.codeium/windsurf/windsurf/workflows/devflow-*.md 2>/dev/null   # Windsurf
 rm -rf ~/.devflow                                                     # Config (optional)
 ```
 

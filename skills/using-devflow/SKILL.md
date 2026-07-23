@@ -28,11 +28,14 @@ If the user just wants internal planning/implementation (single tool), use super
 
 ## Configuration
 
-Devflow reads config from two places (project overrides global):
-1. **Global**: `~/.devflow/config.yaml`
-2. **Project**: `.devflow.yaml` in project root
+Devflow merges config from three layers, first setter wins:
+1. **Project**: `.devflow.yaml` in project root
+2. **Global**: `~/.devflow/config.yaml`
+3. **Defaults**: plugin `config.default.yaml`
 
-If no config exists, defaults are used (Claude Code CLI for external calls).
+If nothing overrides, the shipped defaults apply. The exec-path keys `command_path` /
+`fallback_command` are honoured only from the global and default layers — never a project
+`.devflow.yaml`. See cross-tool-runner.md's "Config" section for the canonical merge.
 
 ## Backend Switching
 
@@ -47,28 +50,31 @@ See `config.default.yaml` for the full template.
 
 ## How Cross-Tool Calls Work
 
-Devflow calls external tools via their CLI in non-interactive mode. The **mechanics** —
-config caching, binary resolution, async launch, polling, session capture, scope
-pinning, and rate-limit fallback — live in a real script, `scripts/devflow-runner.sh`,
-which every devflow skill calls as a subprocess:
+Devflow calls external tools via their CLI in non-interactive mode. The one thing that
+genuinely can't live in markdown — supervising a long (8–10 min) backend CLI: detached
+launch, backoff polling with a hard cap, process-group kill on timeout, session capture,
+and the rate-limit/auth fallback — lives in a real script, `scripts/devflow-runner.sh`,
+which every devflow skill calls as a subprocess. Config resolution (read `.devflow.yaml`,
+pass values as flags) and scope pinning (plain `git`) are done by the calling skill:
 
 ```bash
-bash "$RUNNER" bootstrap
-bash "$RUNNER" scope <mode> [flags]
-bash "$RUNNER" run-external --phase <name> --prompt-file <path> [flags]
+bash "$RUNNER" dir [--fresh]     # the deterministic per-project RUN_DIR (scratch + session store)
+bash "$RUNNER" run-external --backend <b> --model <m> --effort <e> --phase <name> --prompt-file <path> [flags]
 ```
 
 See [`references/cross-tool-runner.md`](references/cross-tool-runner.md) for the full
-subcommand reference, the locator snippet for `$RUNNER`, and the async-launch guidance
-per host. Never hand-roll a one-off `codex exec` / `claude -p` invocation — always go
-through `run-external`.
+subcommand reference, the config→flags mapping, the scope-mode table, the locator snippet
+for `$RUNNER`, and the async-launch guidance per host. Never hand-roll a one-off `codex
+exec` / `claude -p` invocation — always go through `run-external`.
 
 ### Codex binary resolution
 
-`$CODEX_BIN` is resolved once during `bootstrap`: a bare `codex` can hit an
+The codex binary is resolved by `run-external` on each call: a bare `codex` can hit an
 NVM-shadowed old CLI lacking `--json`. Devflow picks the first candidate that passes
 `exec --help | grep --json` (preferring Homebrew `/opt/homebrew/bin/codex`), fails
 loudly if none qualify, and lets you force a path with `codex.command_path` in config.
+That path is read only from the plugin default and `~/.devflow/config.yaml` — never a
+project `.devflow.yaml`, and never a flag you pass (trust boundary; see cross-tool-runner.md).
 
 ## Model Tiers
 
@@ -85,15 +91,16 @@ Configured in `~/.devflow/config.yaml` under `<backend>.reviewer.*` and `<backen
 ## Session Reuse
 
 When `<backend>.session_reuse: true` (default), devflow:
-1. Captures the session ID on the first external call
-   - **claude**: `jq -r '.session_id'` from `--output-format json`
-   - **codex**: `thread_id` from `--json` JSONL first event
+1. Captures the session ID on the first external call (the runner extracts it with
+   `scripts/devflow-json.py` — stdlib JSON, fail-closed, no `jq`)
+   - **claude**: `session_id` from the `--output-format json` object
+   - **codex**: `thread_id` from the `--json` JSONL first event
 2. Resumes the same session for subsequent iterations
    - **claude**: `--resume <session_id>`
    - **codex**: `exec resume <session_id>` with the **same full flag shape** as a fresh
      call (`-c model_reasoning_effort` before `exec`, `--json`, `-m`, `< /dev/null`) —
      handled by `run-external --resume <id>`, see cross-tool-runner.md
-3. Passes sessions between phases (plan review → implementation review) via the shared `run.env`
+3. Passes sessions between phases (plan review → implementation review) via `$RUN_DIR/<phase>.session` files
 
 This saves ~20k tokens per resumed call.
 
@@ -135,11 +142,13 @@ The quality of internal process is lower without superpowers, but devflow's core
 
 Skills use Claude Code tool names. For other platforms:
 
-| Skill references | Codex equivalent | Windsurf equivalent |
-|-----------------|------------------|---------------------|
-| `Bash` | native shell | `run_command` |
-| `Read` | native file tools | `read_file` |
-| `Write` | native file tools | `write_to_file` |
-| `Task` (subagent) | `spawn_agent` | not available |
-| `Skill` (invoke) | native skill load | `skill` tool |
-| `TodoWrite` | `update_plan` | `todo_list` |
+| Skill references | Codex equivalent |
+|-----------------|------------------|
+| `Bash` | native shell |
+| `Read` | native file tools |
+| `Write` | native file tools |
+| `Task` (subagent) | `spawn_agent` |
+| `Skill` (invoke) | native skill load |
+| `TodoWrite` | `update_plan` |
+
+For Gemini CLI tool mappings, see `references/gemini-tools.md`; Cursor uses Claude Code-compatible tool names.

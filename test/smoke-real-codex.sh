@@ -41,17 +41,16 @@ codex:
 YAML
 
 cd "$REPO_FX"
-out="$(bash "$RUNNER" bootstrap)" || { echo "bootstrap failed: $out"; exit 1; }
+out="$(bash "$RUNNER" dir)" || { echo "dir failed: $out"; exit 1; }
 RUN_DIR="$(printf '%s\n' "$out" | sed -n 's/^RUN_DIR=//p')"
-set -a; . "$RUN_DIR/run.env"; set +a
-is "$CODEX_BIN" "$REAL_CODEX" "bootstrap resolved the real codex binary"
+ok "[ -d '$RUN_DIR' ]" "dir created the run directory"
 
 PROMPT_FILE="$WORK/prompt.txt"
 printf 'This is a connectivity smoke test. Reply with exactly one line containing the single word: APPROVED\n' > "$PROMPT_FILE"
 export DEVFLOW_POLL_SCHEDULE="5 5 10 15 30 60 60 90"
 
 echo "launching real codex (may take ~30-90s)..."
-out="$(bash "$RUNNER" run-external --phase smoke --prompt-file "$PROMPT_FILE")"
+out="$(bash "$RUNNER" run-external --backend codex --model gpt-5.5 --effort low --phase smoke --prompt-file "$PROMPT_FILE")"
 kv(){ printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 
 echo "--- $out ---"

@@ -40,18 +40,24 @@ YAML
   export SB REPO_FX
 }
 
-# bootstrap_here: run the real script's bootstrap subcommand as a subprocess (cwd = fixture
-# repo), then source the resulting run.env into THIS shell for the case's own convenience —
-# the code under test never relies on that sourcing; it recomputes everything itself on
-# every subprocess call, exactly like a real agent invocation would.
-bootstrap_here(){
+# run_dir_here: ask the real script for this fixture repo's (secured) RUN_DIR and export it,
+# exactly as a skill does with `devflow-runner.sh dir` before its first call. No config is
+# frozen — the runner resolves the codex binary per call from the trusted config, and cases
+# pass --backend/--model/--effort to run-external explicitly (the values a skill would have
+# read from .devflow.yaml itself).
+run_dir_here(){
   cd "$REPO_FX" || return 1
   local out
-  out="$(bash "$RUNNER" bootstrap)" || { echo "bootstrap failed: $out" >&2; return 1; }
+  out="$(bash "$RUNNER" dir)" || { echo "dir failed: $out" >&2; return 1; }
   RUN_DIR="$(printf '%s\n' "$out" | sed -n 's/^RUN_DIR=//p')"
-  set -a; . "$RUN_DIR/run.env"; set +a
   export RUN_DIR
 }
+
+# rx <run-external flags...>: invoke run-external for the codex fixture with the fixed
+# backend/model/effort a skill would supply after reading .devflow.yaml, so cases don't
+# repeat them. Runs in $REPO_FX. FAKE_CODEX_MODE / FAKE_CODEX_VERDICT are read from the
+# environment — set them inline: `FAKE_CODEX_MODE=ok rx --phase p --prompt-file f`.
+rx(){ ( cd "$REPO_FX" && bash "$RUNNER" run-external --backend codex --model gpt-5.5 --effort high "$@" ); }
 
 # RUN_DIR now lives under ${TMPDIR:-/tmp}/devflow-run.<hash> — OUTSIDE $SB (unlike the
 # old in-repo `.devflow/run`, which `rm -rf "$SB"` cleaned up as a side effect). Remove it
