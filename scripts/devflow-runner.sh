@@ -271,10 +271,15 @@ devflow_run_external() {
         < /dev/null > "$EVENTS" 2> "$STDERR" &
     fi
   else  # claude
-    local CLAUDE_EXTRA=""
-    [ "${SESSION_REUSE:-true}" = "false" ] && CLAUDE_EXTRA="--no-session-persistence"
-    nohup python3 -c "$DEVFLOW_SETSID" "$bin" -p --output-format json --permission-mode "$PMODE" $CLAUDE_EXTRA --model "$MODEL" --effort "$EFFORT" \
-      ${RESUME_ID:+--resume "$RESUME_ID"} "$PROMPT" < /dev/null > "$OUT" 2> "$STDERR" &
+    # argv as an array, matching the codex branch above — no unquoted `$CLAUDE_EXTRA` /
+    # `${RESUME_ID:+…}` splices. Only argv delta vs the spliced form: --no-session-persistence
+    # now follows --effort instead of preceding --model. Both are order-independent valueless
+    # options and "$PROMPT" is still the sole trailing positional, so claude parses it the same.
+    local -a cargs=(-p --output-format json --permission-mode "$PMODE" --model "$MODEL" --effort "$EFFORT")
+    [ "${SESSION_REUSE:-true}" = "false" ] && cargs+=(--no-session-persistence)
+    [ -n "${RESUME_ID:-}" ] && cargs+=(--resume "$RESUME_ID")
+    nohup python3 -c "$DEVFLOW_SETSID" "$bin" "${cargs[@]}" "$PROMPT" \
+      < /dev/null > "$OUT" 2> "$STDERR" &
   fi
   CODEX_PID=$!
 
@@ -372,6 +377,9 @@ cmd_run_external() {
       --backend)          _need_val --backend "$#";      BACKEND="$2"; shift 2 ;;
       --model)            _need_val --model "$#";        MODEL="$2"; shift 2 ;;
       --effort)           _need_val --effort "$#";       EFFORT="$2"; shift 2 ;;
+      # An EMPTY value is legal and means "fresh session" (both backends branch on [ -n ] before
+      # passing anything to the CLI), so callers pass it UNCONDITIONALLY — never spliced in with a
+      # shell conditional. See "Always pass --resume unconditionally" in cross-tool-runner.md.
       --resume)           _need_val --resume "$#";       RESUME_ID="$2"; shift 2 ;;
       --role)             _need_val --role "$#";         ROLE="$2"; shift 2 ;;
       --no-session-reuse) SESSION_REUSE="false"; shift ;;

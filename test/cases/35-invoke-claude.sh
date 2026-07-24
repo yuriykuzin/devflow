@@ -44,6 +44,15 @@ is "$(kv "$out" EXIT)" "0" "resume call exits 0"
 has "$(cat "$FAKE_CLAUDE_LOG")" "resume=1" "--resume set -> claude invoked with --resume"
 has "$(cat "$FAKE_CLAUDE_LOG")" "permission-mode=default" "implementer role -> write permission-mode (default), derived from --role"
 
+# --- empty --resume == "fresh" (same caller contract as the codex case in 30-invoke) ---
+# Skills pass --resume unconditionally with a possibly-empty session file, so an empty value must
+# be accepted AND must not put `--resume` on the claude command line.
+: > "$FAKE_CLAUDE_LOG"
+out="$(FAKE_CLAUDE_MODE=ok cx --phase final-review --prompt-file "$PROMPT_FILE" --resume "")"; rc=$?
+is "$rc" "0"                                      "empty --resume is accepted, not rejected as a usage error"
+is "$(kv "$out" EXIT)" "0"                        "empty --resume call exits 0"
+has "$(cat "$FAKE_CLAUDE_LOG")" "resume=0"        "empty --resume -> claude invoked WITHOUT --resume"
+
 # --- hang: claude never exits -> hard-cap kill (124) ---
 SECONDS=0
 out="$(FAKE_CLAUDE_MODE=hang cx --phase final-review --prompt-file "$PROMPT_FILE")"

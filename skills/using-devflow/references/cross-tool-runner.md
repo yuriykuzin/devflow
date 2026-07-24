@@ -115,7 +115,7 @@ extracts the verdict text and session id, and prints a small `KEY=VALUE` report.
 | `--phase <name>` | yes | `plan-review` \| `impl-review` \| `final-review` \| etc. — namespaces the output files under `$RUN_DIR` |
 | `--prompt-file <path>` | yes | the full prompt (SCOPE block + review instructions), written to a file first — never inline; shell-quoting a multi-KB prompt is a footgun |
 | `--role reviewer\|implementer` | no (default `reviewer`) | `reviewer` runs the backend read-only; `implementer` gets workspace-write. This alone sets the write posture — the runner derives it (claude `--permission-mode plan`/`default`, codex read-only/`--full-auto`); there is no separate permission flag. Does NOT pick the model — you pass that explicitly |
-| `--resume <session-id>` | no | resume that session instead of starting fresh |
+| `--resume <session-id>` | no | resume that session instead of starting fresh. An **empty value is legal and means "fresh"**, so pass it unconditionally — see below |
 | `--no-session-reuse` | no | ephemeral call — no session persisted |
 
 The binary that actually runs (and the rate-limit `fallback_command`) is resolved by the
@@ -154,6 +154,28 @@ the exit code, before escalating to the user.
 Read it with `cat "$SESSION_FILE"` and pass its content as `--resume` next iteration; this
 keeps the fix → re-review loop cheap (~20k tokens saved per resumed call) instead of
 degrading to a fresh, context-less review.
+
+**Always pass `--resume "$RESUME_ID"` unconditionally** — an empty value means "start fresh",
+which is normally the first-iteration case, so no conditional is needed:
+
+```bash
+RESUME_ID="$(cat "$RUN_DIR/plan-review.session" 2>/dev/null)"   # empty on the first iteration
+bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
+  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt" --resume "$RESUME_ID"
+```
+
+An empty session file is not *always* a first iteration — a prior call can exit `124`, or
+`--no-session-reuse` can have suppressed capture. That is harmless for a re-review prompt that
+carries its own context, but if your prompt assumes the resumed session already knows the plan
+or the diff, test `[ -s "$RUN_DIR/<phase>.session" ]` first and inline that context into the
+prompt when it is empty.
+
+Do **not** splice the flag in with `${RESUME_ID:+--resume "$RESUME_ID"}`. That idiom depends on
+the shell word-splitting an unquoted expansion: bash and sh do, **zsh does not** — under zsh it
+arrives as a single `--resume <id>` argument and the runner rejects it with
+`run-external: unknown flag`, exit 2, so every resumed iteration fails to launch. Host agents run
+these snippets through whatever shell their Bash tool uses (zsh on macOS), so the quoted,
+unconditional form is the only portable one.
 
 ## Config: what to read, and pass as flags
 
@@ -255,7 +277,7 @@ RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 printf '%s\n\n%s\n' "$SCOPE_BLOCK" "$REVIEW_PROMPT_BODY" > "$RUN_DIR/prompt.txt"
 RESUME_ID="$(cat "$RUN_DIR/plan-review.session" 2>/dev/null)"   # empty on first iteration
 bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
-  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt" ${RESUME_ID:+--resume "$RESUME_ID"}
+  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt" --resume "$RESUME_ID"
 
 # 5) read results
 cat "$RUN_DIR/plan-review-verdict.txt"    # full verdict text

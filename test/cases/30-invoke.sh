@@ -40,6 +40,15 @@ out="$(FAKE_CODEX_MODE=ok rx --phase final-review --prompt-file "$PROMPT_FILE" -
 is "$(kv "$out" EXIT)" "0" "resume call exits 0"
 has "$(cat "$FAKE_CODEX_LOG")" "resume=1" "--resume set -> codex invoked via 'exec resume'"
 
+# --- empty --resume == "fresh": the caller contract the skills depend on. They read the session
+# file with `cat … 2>/dev/null` (empty on the first iteration) and pass --resume UNCONDITIONALLY, so
+# an empty value must be accepted (not a usage error) AND must take the fresh path, not `exec resume`.
+: > "$FAKE_CODEX_LOG"
+out="$(FAKE_CODEX_MODE=ok rx --phase final-review --prompt-file "$PROMPT_FILE" --resume "")"; rc=$?
+is "$rc" "0"                                     "empty --resume is accepted, not rejected as a usage error"
+is "$(kv "$out" EXIT)" "0"                       "empty --resume call exits 0"
+has "$(cat "$FAKE_CODEX_LOG")" "resume=0"        "empty --resume -> fresh 'exec', never 'exec resume'"
+
 # --- hang: never emits turn.completed -> poll schedule exhausts -> hard-cap kill (124) ---
 SECONDS=0
 out="$(FAKE_CODEX_MODE=hang rx --phase final-review --prompt-file "$PROMPT_FILE")"

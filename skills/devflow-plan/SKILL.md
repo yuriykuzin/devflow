@@ -174,7 +174,7 @@ printf 'SCOPE: Review ONLY this plan (read-only). Inspect it with: cat %s\nDo NO
 printf '%s\n\n%s\n' "$(cat "$RUN_DIR/plan-review-scope.txt")" "$REVIEW_PROMPT" > "$RUN_DIR/plan-review-prompt.txt"
 RESUME_ID="$(cat "$RUN_DIR/plan-review.session" 2>/dev/null)"   # empty on the first iteration
 bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
-  --phase plan-review --prompt-file "$RUN_DIR/plan-review-prompt.txt" ${RESUME_ID:+--resume "$RESUME_ID"}
+  --phase plan-review --prompt-file "$RUN_DIR/plan-review-prompt.txt" --resume "$RESUME_ID"
 ```
 
 - **Scope** — the plan file, read-only (reviewer reads `$PLAN_PATH`; no diff).

@@ -157,7 +157,7 @@ autonomy: attended         # attended | unattended
 output_dir: "docs/devflow/reports"
 ```
 
-> The only keys that change behavior are `backend`, `model`, `effort`, `command_path`, `session_reuse`, and `fallback_command`. The CLI invocation (flags, read-only vs write posture, session capture) is built by the runner — see `skills/using-devflow/references/cross-tool-runner.md`.
+> The only keys that change behavior are `backend`, `model`, `effort`, `command_path`, `fallback_command`, `session_reuse`, `autonomy`, `output_dir`, `review_personas`, and `integrations`. The CLI invocation (flags, read-only vs write posture, session capture) is built by the runner — see `skills/using-devflow/references/cross-tool-runner.md`.
 
 **Environment overrides** (not config-file keys): `DEVFLOW_RUN_TTL_DAYS` (default `7`) sets how many idle days before an abandoned per-project run dir under `${TMPDIR:-/tmp}` is auto-reclaimed on the next `dir` call; set it to a non-number to disable the sweep entirely.
 

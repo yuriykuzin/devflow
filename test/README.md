@@ -41,9 +41,10 @@ The runner reads two env overrides so tests don't wait real minutes; defaults ar
 | File | Covers |
 |------|--------|
 | `10-dir` | `dir`: emits the deterministic RUN_DIR (created 0700, owned by us, never a symlink); `dir --fresh` wipes stale phase-session files and re-emits a clean, re-secured RUN_DIR |
+| `15-gc` | `dir`'s opportunistic GC of sibling run dirs: prunes an OLD+IDLE sibling, keeps one inside the TTL, keeps an OLD sibling that still holds a live `.pids` lease (liveness gate, not mtime), never prunes the current RUN_DIR, and a non-numeric `DEVFLOW_RUN_TTL_DAYS` disables the sweep. Reroots `$TMPDIR` into the sandbox so it can only ever touch its own dirs |
 | `25-pid-guard` | RUN_DIR concurrent-wipe race: while a `run-external` PID is leased under `.pids/`, a second `dir --fresh` REFUSES to `rm -rf` the live run; a stale/dead marker is ignored (self-healing) |
-| `30-invoke` | `run-external` on `backend: codex`: required-flag validation (`--backend`/`--model`/`--effort`); verdict text captured to `VERDICT_FILE` verbatim (no machine parse) + session captured, exit 0; `--no-session-reuse` ephemeral; `--resume` path; linger → completes, bounded drain, reaped as success (exit 0, verdict survives); hang → poll exhausts → hard-cap kill 124; reviewer read-only vs implementer `--full-auto` |
-| `35-invoke-claude` | `run-external` on `backend: claude`: `.result`/`.session_id` JSON parsing, `command -v claude` resolution via PATH, write posture derived from `--role` (reviewer → `--permission-mode plan`, implementer → `default`), `--resume`/`--no-session-persistence` flag plumbing, hard-cap kill (no linger case — see above) |
+| `30-invoke` | `run-external` on `backend: codex`: required-flag validation (`--backend`/`--model`/`--effort`); verdict text captured to `VERDICT_FILE` verbatim (no machine parse) + session captured, exit 0; `--no-session-reuse` ephemeral; `--resume` path, plus the caller contract that an EMPTY `--resume` is accepted and means "fresh" (never `exec resume`) so skills can pass it unconditionally; linger → completes, bounded drain, reaped as success (exit 0, verdict survives); hang → poll exhausts → hard-cap kill 124; reviewer read-only vs implementer `--full-auto` |
+| `35-invoke-claude` | `run-external` on `backend: claude`: `.result`/`.session_id` JSON parsing, `command -v claude` resolution via PATH, write posture derived from `--role` (reviewer → `--permission-mode plan`, implementer → `default`), `--resume`/`--no-session-persistence` flag plumbing (incl. an empty `--resume` meaning "fresh" — the flag is left off the claude command line), hard-cap kill (no linger case — see above) |
 | `40-killwait` | `devflow_kill_wait` (white-box) escalates to `-9` on a SIGTERM-ignoring child, returns bounded |
 | `45-trust-boundary` | `command_path` is honoured ONLY from `~/.devflow/config.yaml`, never a project `.devflow.yaml`: a repo-planted binary named by project config never runs; the global-config codex wins |
 | `60-fallback` | `devflow_after_call` (white-box): success passes, rate-limit retries once via fallback, auth escalates w/o retry, empty fallback escalates |
@@ -78,3 +79,8 @@ suite fast and dependency-free — a deliberate minimalism trade-off):
 - **Config-parse edge cases** — the `awk` reader of `command_path`/`fallback_command` is
   tested for the happy path and the trust boundary (`45-trust-boundary`), not for malformed
   YAML, comments-in-odd-places, or duplicate keys.
+- **Shell-portability of the skill snippets** — `30`/`35` assert the runner's *side* of the
+  empty-`--resume` contract, but nothing checks that the `bash "$RUNNER" run-external …` lines
+  inside `skills/**/SKILL.md` still honour it. A snippet regressing to
+  `${RESUME_ID:+--resume "$RESUME_ID"}` breaks only under zsh (the host agents' shell), and the
+  suite runs under bash, so it would stay green. Verified by hand on change.

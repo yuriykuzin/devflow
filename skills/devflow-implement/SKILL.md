@@ -231,7 +231,7 @@ else
 fi
 printf '%s\n\n%s\n' "$(cat "$RUN_DIR/impl-review-scope.txt")" "$PROMPT_BODY" > "$RUN_DIR/impl-review-prompt.txt"
 bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
-  --phase impl-review --prompt-file "$RUN_DIR/impl-review-prompt.txt" ${RESUME_ID:+--resume "$RESUME_ID"}
+  --phase impl-review --prompt-file "$RUN_DIR/impl-review-prompt.txt" --resume "$RESUME_ID"
 ```
 
 - **Scope** — the changeset since `$IMPL_BASE` (Step 3), pinned inline via `git diff

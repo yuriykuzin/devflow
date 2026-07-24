@@ -179,7 +179,7 @@ esac
 printf '%s\n\n%s\n' "$(cat "$RUN_DIR/final-review-scope.txt")" "$REVIEW_PROMPT" > "$RUN_DIR/final-review-prompt.txt"
 RESUME_ID="$(cat "$RUN_DIR/final-review.session" 2>/dev/null)"   # empty on the first iteration
 bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
-  --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt" ${RESUME_ID:+--resume "$RESUME_ID"}
+  --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt" --resume "$RESUME_ID"
 ```
 
 - **Scope** — built inline from `SCOPE_MODE` (Step 2 table: uncommitted / staged / pr /
