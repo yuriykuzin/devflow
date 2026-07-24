@@ -89,6 +89,18 @@ Use `--fresh` when starting an unrelated feature in a checkout that already has 
 or when a `--resume` fails because the session id is gone/expired — rather than debugging a
 stale-session error.
 
+Every `dir` call also opportunistically GCs *abandoned sibling* run dirs. This matters because
+`RUN_DIR` is keyed on the git top-level: a worktree-per-feature workflow mints a fresh hash
+every run, so `--fresh` reuse never reclaims them and they would otherwise pile up in
+`${TMPDIR:-/tmp}` forever. A sibling is reclaimed only when it is all three of: **ours** (uid
+match — never another user's dir on a shared `/tmp`), **idle** (no live PID leased under
+`.pids/` — the same liveness test `dir --fresh` honours, so a running call is never reclaimed
+even if its dir looks old), and **old** (dir mtime more than `DEVFLOW_RUN_TTL_DAYS` full days
+ago; default 7, rounded down). The age is measured from last *use*, not creation — every
+`dir` / `run-external` call touches its own `RUN_DIR` — so a steadily-reused checkout is never
+pruned mid-project. The current `RUN_DIR` is always excluded. Set `DEVFLOW_RUN_TTL_DAYS` to a
+non-number to disable the sweep.
+
 ### `run-external --backend <b> --model <m> --effort <e> --phase <p> --prompt-file <f> [flags]`
 
 Launches the external call (non-blocking internally — the script polls its own child with

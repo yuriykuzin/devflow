@@ -43,6 +43,11 @@ devflow_secure_dir() {
   [ "$owner" = "$(id -u)" ] || { echo "devflow: FATAL — $d is not owned by the current user; refusing to use it." >&2; exit 1; }
   perm="$(stat -c %a "$d" 2>/dev/null || stat -f %Lp "$d" 2>/dev/null)"
   [ "${perm: -3}" = "700" ] || { echo "devflow: FATAL — $d has unsafe permissions ($perm, expected 700)." >&2; exit 1; }
+  # Stamp last-USE: this runs on every invocation (dir + run-external), so RUN_DIR's own mtime
+  # tracks activity, not first-creation. The GC sweep below ages dirs by this — without it a
+  # steadily-reused checkout (whose phase files are only truncated, never re-created, so the
+  # dir mtime never moves) would look abandoned and be reaped mid-project.
+  touch "$d" 2>/dev/null
 }
 devflow_secure_dir "$RUN_DIR"
 
@@ -66,19 +71,71 @@ devflow_lease_acquire() {
   : > "$DEVFLOW_LEASE" 2>/dev/null || { echo "devflow: WARN — could not register run lease; a concurrent 'dir --fresh' will not be blocked from wiping this run." >&2; return 0; }
   trap 'rm -f "$DEVFLOW_LEASE" 2>/dev/null' EXIT
 }
-devflow_guard_no_live_run() {
-  local d="$RUN_DIR/.pids" marker pid
-  [ -d "$d" ] || return 0
+# True (0) if <dir>/.pids/ holds at least one LIVE PID marker; sets DEVFLOW_LIVE_PID to it.
+# Shared by the self-wipe guard (dir --fresh) AND the GC sweep, so both honour the same
+# run-liveness lease instead of GC inventing a weaker mtime-only heuristic for "is it active".
+devflow_dir_has_live_pid() {
+  local d="$1/.pids" marker pid
+  DEVFLOW_LIVE_PID=""
+  [ -d "$d" ] || return 1
   for marker in "$d"/*; do
     [ -e "$marker" ] || continue
     pid="${marker##*/}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac   # ignore non-PID entries
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "devflow: FATAL — a devflow run (pid $pid) is active in $RUN_DIR; refusing to wipe it." >&2
-      echo "  Wait for it to finish, or stop pid $pid, then retry." >&2
-      exit 1
-    fi
+    if kill -0 "$pid" 2>/dev/null; then DEVFLOW_LIVE_PID="$pid"; return 0; fi
   done
+  return 1
+}
+devflow_guard_no_live_run() {
+  if devflow_dir_has_live_pid "$RUN_DIR"; then
+    echo "devflow: FATAL — a devflow run (pid $DEVFLOW_LIVE_PID) is active in $RUN_DIR; refusing to wipe it." >&2
+    echo "  Wait for it to finish, or stop pid $DEVFLOW_LIVE_PID, then retry." >&2
+    exit 1
+  fi
+}
+
+# ── opportunistic GC of stale run dirs ───────────────────────────────────────────
+# RUN_DIR is one-per-project-root, so a worktree-per-feature workflow mints a NEW hash every
+# run and `dir --fresh` reuse never reclaims the old ones — completed run dirs would pile up
+# in $TMPDIR without bound. GC runs on EVERY `dir` (not only `--fresh`): `dir` is the once-per-
+# pipeline entry point every skill calls, whereas `--fresh` is passed only when starting a NEW
+# feature — gating the sweep on it would let dirs accumulate indefinitely for anyone who reuses
+# a checkout instead of worktrees. Each call reclaims a sibling devflow-run.* dir only when it
+# is ALL THREE of:
+#   - OURS       — uid matches (mirrors devflow_secure_dir's ownership assertion; on a shared
+#                  /tmp we must never rm another user's run dir);
+#   - IDLE       — no live PID leased under .pids/ (the SAME liveness test dir --fresh honours
+#                  via devflow_dir_has_live_pid — a running call is never reclaimed, even if
+#                  its dir mtime looks old);
+#   - OLD        — dir mtime more than DEVFLOW_RUN_TTL_DAYS full 24h-periods ago (default 7;
+#                  find rounds down, so ~8 days in practice — conservative, errs to keeping).
+# mtime is a true last-USE clock because devflow_secure_dir touch()es RUN_DIR every invocation.
+# The current RUN_DIR is excluded by basename (robust to a $TMPDIR trailing slash that would
+# make a `//` path-string compare miss). Best-effort: a non-numeric DEVFLOW_RUN_TTL_DAYS
+# disables the sweep, a failed rm WARNs (never a silent skip) but never aborts the command, and
+# a non-empty sweep says what it did.
+# NOTE: the per-candidate liveness check and its rm are not atomic — the SAME class of accepted
+# race as the self-wipe guard (see the lease NOTE above), but with a wider exposure: it can fire
+# on a routine plain `dir` (not just an operator's deliberate `--fresh`), and the victim is any
+# old+idle sibling, not only self. A sibling that revives in the sliver between find's snapshot
+# and its rm could be wiped (the touch() in devflow_secure_dir does NOT save it — find already
+# captured the old mtime). Accepted rather than closed with a global lock (which would be gold-
+# plating here) because the victim must ALSO have sat idle past the TTL to be listed at all — an
+# 8-days-dormant checkout reviving in that exact sub-second window on a single-user machine is
+# vanishingly unlikely, and the cost is a recreatable session dir, not data.
+devflow_gc_old_runs() {
+  local ttl="${DEVFLOW_RUN_TTL_DAYS:-7}" self cand n=0
+  case "$ttl" in ''|*[!0-9]*) return 0 ;; esac
+  self="$(basename "$RUN_DIR")"
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    devflow_dir_has_live_pid "$cand" && continue   # never reap a live run (belt for a reused old dir)
+    if rm -rf "$cand" 2>/dev/null; then n=$((n+1))
+    else echo "devflow: WARN — GC could not reclaim $cand (files locked/immutable?)." >&2; fi
+  done < <(find "$(dirname "$RUN_DIR")" -maxdepth 1 -type d -name 'devflow-run.*' \
+             ! -name "$self" -uid "$(id -u)" -mtime "+$ttl" 2>/dev/null)
+  [ "$n" -gt 0 ] && echo "devflow: GC reclaimed $n abandoned run dir(s) (idle >${ttl}d)." >&2
+  return 0
 }
 
 # ── dir ────────────────────────────────────────────────────────────────────────
@@ -100,6 +157,7 @@ cmd_dir() {
     rm -rf "$RUN_DIR" || { echo "devflow: FATAL — could not wipe $RUN_DIR (files locked/immutable?); refusing to proceed on a stale run." >&2; exit 1; }
     devflow_secure_dir "$RUN_DIR"
   fi
+  devflow_gc_old_runs   # prune abandoned sibling run dirs (worktree workflows never reuse a hash)
   echo "RUN_DIR=$RUN_DIR"
 }
 
