@@ -72,7 +72,9 @@ first layer that sets a key wins (see cross-tool-runner.md "Config"). Note, for 
 `backend`; the active backend's `reviewer` block `model`+`effort` (for review calls) and its
 `implementer` block `model`+`effort` (for the Step 5 handoff); `session_reuse`; `output_dir`
 (substitute it above). You pass `backend`/`model`/`effort` to `run-external` as flags — the
-runner no longer resolves them. `command_path` is the exception: never
+runner no longer resolves them. The reviewing backend is resolved **by host** —
+`external_review.from_<host>` first, `backend:` only as the fallback, `none` = internal personas
+only; see "Which backend reviews" in `skills/using-devflow/SKILL.md`. `command_path` is the exception: never
 read or pass it; the runner resolves the executable itself from the trusted config only
 (see the Security section of `skills/using-devflow/references/cross-tool-runner.md`, which
 also has the `$RUNNER` locator and the full subcommand reference).
@@ -243,9 +245,9 @@ them block — **the gate is what still blocks after synthesis, not the raw verd
   bash "$RUNNER" freshness-check --phase plan-review --file "$PLAN_PATH"
   ```
 
-  No difference proves the external reviewer read the plan being finalized. No
+  No difference means the external reviewer read the plan you are finalizing. No
   `plan-review.tree` at all (or only a leftover `.pending`) means no external call completed —
-  that is never APPROVED, it is `NEEDS_USER_DECISION`. Edited the plan since? Re-review. Then
+  say so in the report instead of implying one did. Edited the plan since? Re-review. Then
   proceed to Step 5, listing every non-blocking finding with its reason — a deferred plan
   finding is a candidate for a later changeset, not a silent drop.
 - **Something blocking**: fix those in the plan (only those), write what you changed and
@@ -314,7 +316,7 @@ Announce to user:
 ## Autonomy Modes
 
 - **attended** (default): Run superpowers brainstorming normally (asks user questions). Present external review findings to user before fixing.
-- **unattended**: Skip brainstorming questions (use feature description as-is). Fix open blocking findings without asking. Escalate as `NEEDS_USER_DECISION` when blockers remain unresolved or a round's fixes produce new ones, or a downgrade would need judgment rather than mechanical proof (see `devflow:review` Step 5).
+- **unattended**: Skip brainstorming questions (use feature description as-is). Fix open blocking findings without asking. Stop as `NEEDS_USER_DECISION` when findings remain unresolved or a round's fixes produce new ones.
 
 ## Key Rules
 

@@ -117,7 +117,9 @@ Read the devflow config (merge three layers, each overriding the next: `.devflow
 `~/.devflow/config.yaml` → plugin `config.default.yaml`)
 once and note, for the whole run: `backend`, the `reviewer` and `implementer` `model`+`effort`,
 `session_reuse`, and `output_dir`. Each phase skill passes `backend`/`model`/`effort` to
-`run-external` as flags; `command_path` stays with the runner (never a flag).
+`run-external` as flags; `command_path` stays with the runner (never a flag). The reviewing backend is resolved **by host** —
+`external_review.from_<host>` first, `backend:` only as the fallback, `none` = internal personas
+only; see "Which backend reviews" in `skills/using-devflow/SKILL.md`.
 Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
 `$RUN_DIR/plan-path`; Phases 2–3 read it back from there.
 - **Orchestrator** (you): uses its own model (whatever the host agent runs).
@@ -166,16 +168,14 @@ Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
 - External cross-tool review
 - Combined report
 
-**This is the final quality gate.** The gate is *findings still blocking after
-synthesis* — not a reviewer's raw verdict token. On open blockers:
+**This is the final review.** What matters is the findings you still consider worth fixing —
+not a reviewer's raw verdict token. On open findings:
 - **attended**: Present to user for decision
 - **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review
-  loop and the APPROVED-closure rules (each round re-runs every persona plus the external
-  reviewer with a delta brief; APPROVED requires a fresh external reading of the exact tree
-  being approved; unattended downgrades must be mechanically provable). It runs while the
-  blockers are closing — no round cap — and stops as `NEEDS_USER_DECISION` when a round's fixes
-  produce new blockers instead, or a fix would break the pinned scope. Do not restate or
-  override those rules here.
+  loop (each round re-runs every persona plus the external reviewer, if one is configured, with
+  a delta brief). No round cap; it stops as `NEEDS_USER_DECISION` when a round's fixes produce
+  new findings instead, or a fix would break the pinned scope. Do not restate or override
+  those rules here.
 
 **`NEEDS_USER_DECISION` propagates up.** It is neither approval nor failure: end the run,
 report it as the pipeline status with the exact finding IDs and the decision needed, and do

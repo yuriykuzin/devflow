@@ -3,6 +3,18 @@
 # Per-project overrides: place .devflow.yaml in project root.
 
 # ──────────────────────────────────────────────────────────────
+# EXTERNAL REVIEW — resolved by HOST, not by one global switch
+# ──────────────────────────────────────────────────────────────
+# The value of an external review is a DIFFERENT tool's eyes, so which backend to call
+# depends on which tool is hosting the run. `none` means: run internal personas only and
+# close the review on their synthesis — there is no external verdict to wait for.
+external_review:
+  from_claude: codex           # hosted by Claude Code → external review via the codex CLI
+  from_codex: none             # hosted by Codex → internal personas only, no external call
+# `backend:` below stays the fallback for a host not listed here, and still selects the
+# implementer backend for handoff calls.
+
+# ──────────────────────────────────────────────────────────────
 # BACKEND SELECTOR — change this one line to switch everything
 # ──────────────────────────────────────────────────────────────
 backend: claude              # codex | claude
@@ -36,7 +48,7 @@ codex:
   # The CLI invocation itself is built by the runner — see the canonical procedure in
   # skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
-    model: "gpt-5.5"
+    model: "gpt-5.6-terra"           # the model devflow reviews WITH when the host is Claude
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   implementer:
     model: "gpt-5.5"

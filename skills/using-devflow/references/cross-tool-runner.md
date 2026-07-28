@@ -223,7 +223,7 @@ bash "$RUNNER" freshness-check --phase final-review
 | 0 | `FRESH=yes` | still the reviewed tree — nothing drifted since the verdict |
 | 1 | `FRESH=no` `REASON=tree-changed` | something changed since the review — re-review before approving |
 | 1 | `FRESH=no` `REASON=snapshot-failed` | the review target could not be read at all (no git repo, an unreadable file, no `shasum`/`sha256sum`) — a permissions/environment problem, NOT an edit; fix that, then re-check. Never APPROVED |
-| 2 | `FRESH=no` `REASON=no-tree` | no call ever completed for this phase → not reviewed, so never APPROVED; report `NEEDS_USER_DECISION` |
+| 2 | `FRESH=no` `REASON=no-tree` | no external call ever completed for this phase — say so in the report rather than implying one did |
 
 Both flags are opt-in so plain calls stay cheap, but any skill whose output is an APPROVED /
 CHANGES_REQUESTED verdict should use them. Exit 2 also covers usage errors, so read `REASON=`

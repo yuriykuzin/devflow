@@ -32,8 +32,11 @@ RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 
 Read the devflow config (merge three layers, each overriding the next: `.devflow.yaml` →
 `~/.devflow/config.yaml` → plugin `config.default.yaml`)
-and note the active `backend`, its `reviewer` `model`+`effort`, and `session_reuse`; you pass
-these to `run-external` as flags. `command_path` stays with the runner
+and note the reviewing `backend`, its `reviewer` `model`+`effort`, and `session_reuse`; you pass
+these to `run-external` as flags. **Resolve the backend by host**, not from `backend:` alone:
+`external_review.from_<host>` wins, `backend:` is the fallback, and `none` means this host runs
+internal personas only — see "Which backend reviews" in `skills/using-devflow/SKILL.md` for the
+canonical rule. `command_path` stays with the runner
 (never a flag) — see the Security section of
 `skills/using-devflow/references/cross-tool-runner.md`. `RUN_DIR` is deterministic per
 project (a hash of the repo root), so a standalone `devflow:review` in a checkout that ran
@@ -101,7 +104,9 @@ Synthesize findings after both complete. Two axes of diversity: **personas × to
    not.
 
 **External review** (single generalist, runs via CLI in background):
-Launch the external tool command (Step 4 below) at the same time.
+Launch the external tool command (Step 4 below) at the same time — unless the host resolves to
+`external_review: none`, in which case skip Step 4 entirely, note the resolution in the report,
+and close on the internal synthesis.
 External always uses the **single generalist prompt** — persona diversity
 comes from internal sub-agents, independence comes from the external tool.
 Do NOT send multi-persona prompt to external reviewer.
@@ -217,7 +222,7 @@ else
   SCOPE_LIST="$(printf '%s\n%s\n' "$FILES" "$UNTRACKED" | grep -v '^[[:space:]]*$')"
   [ -n "$SCOPE_LIST" ] || { echo "devflow: empty scope for '$SCOPE_MODE' — refusing to pin" >&2; exit 1; }
   { printf 'SCOPE: Review ONLY this changeset. Inspect it with: %s\n' "$DIFFCMD"
-    printf 'Baseline: %s\n' "${BASELINE:-unresolved — no mechanical pre-existing downgrade}"
+    printf 'Baseline: %s\n' "${BASELINE:-unresolved — cannot tell pre-existing from new}"
     echo "Files in scope:"; printf '%s\n' "$SCOPE_LIST"
     echo "Anything outside this changeset, EXCEPT files created or edited by a fix round of"
     echo "this same review, -> list under OUT_OF_SCOPE and do NOT block on it."
@@ -279,48 +284,29 @@ Combine internal (superpowers) and external review findings:
 3. **Filter false positives** — if you're confident an issue is wrong, explain why
 4. **Categorize** — group by file, blocking findings first
 
-**Synthesis is the gate — not the reviewers' raw verdict token.** You decide which findings
-block, by the same test as `review-personas.md`. A raw `CHANGES_REQUESTED` whose findings all
-turn out non-blocking does not block; a raw `APPROVED` does not clear a finding you know is a
-real blocker.
+**You decide, not the reviewers' verdict token.** You have the internal personas' findings and,
+if an external backend is configured for this host, the external reviewer's. Read them and make
+the call for each finding: **fix it now, or skip it with a reason**. A raw `CHANGES_REQUESTED`
+whose findings all turn out non-blocking does not block; a raw `APPROVED` does not clear a
+finding you know is real.
 
-Four limits on that authority — they are what keeps the override honest:
+Two rules on that decision, and they are about honesty, not permission:
 
-- **Freshness.** You may only close a review whose external call actually read the tree you
-  are approving. Ask the runner:
+- **Nothing disappears.** Every raw finding lands in the report — either as fixed, or in the
+  "Not actioned" table with its reason and a proposed next step. Deciding not to fix is fine;
+  quietly omitting a finding is not.
+- **Say what you did not verify.** If a finding is plausible but unproven, give it one bounded
+  check and decide from the evidence. Never open an open-ended research loop on one, and never
+  present a guess as a verified non-issue.
 
-  ```bash
-  # <inline the $RUNNER locator snippet — see cross-tool-runner.md>
-  bash "$RUNNER" freshness-check --phase final-review
-  ```
-
-  It compares content, not status, so editing an already-modified file breaks it. Exit 0 =
-  still the reviewed tree. Exit 1 = read the `REASON=` line: `tree-changed` means you edited
-  something since (re-review), `snapshot-failed` means the target could not be read at all (a
-  permissions/environment problem, not an edit — fix that and re-check). **Exit 2 = no
-  `.tree`, so no external call ever completed — that can never be APPROVED; it is
-  `NEEDS_USER_DECISION`** (exit 2 is also a usage error, so read the `REASON=` line, not just
-  the code). From `devflow:implement` the phase is `impl-review`; from `devflow:plan` it is
-  `plan-review` **plus `--file "$PLAN_PATH"`**, because that phase snapshots the plan file
-  rather than the worktree and a mismatch reports `tree-changed` forever. This is the mechanical
-  replacement for the old "never vouch for your own fix" prose — you may reclassify someone else's fresh reading, never certify unread code.
-- **Downgrade only, never invent.** Every raw finding must appear in the report with its
-  blocking call and a reason. Silently dropping one is forbidden. You may declare a finding
-  non-blocking; you may not mark a changeset clear on findings you never addressed.
-- **Protected categories.** Security, data loss, and correctness bugs with a concrete
-  reproduction are not yours to downgrade alone — fix them, or stop as
-  `NEEDS_USER_DECISION`.
-- **Unattended is stricter.** With no user present, you may only downgrade what is provable
-  from files on disk: outside the pinned list, or pre-existing (present at the recorded
-  baseline SHA — and only if that baseline actually resolved).
-  Both read `<phase>-scope.txt`, which is written once and never widened, so neither depends on
-  your memory of earlier rounds. A file your own fix round created is **not** out of scope:
-  the pinned scope text says so explicitly, so it is in the list the reviewer was given.
-  Judgment downgrades ("I consider this a nitpick") require attended mode; unattended they
-  become `NEEDS_USER_DECISION`.
-
-An unproven finding gets **one** bounded check, then a decision from the evidence. Never open
-an open-ended research loop on one.
+Useful input for that call, not a gate: `bash "$RUNNER" freshness-check --phase final-review`
+answers whether the tree still matches what the external reviewer actually read (exit 0 = yes;
+1 with `REASON=tree-changed` = you edited since; 1 with `REASON=snapshot-failed` = the target
+could not be read; 2 = no external call ever completed for this phase). From
+`devflow:implement` the phase is `impl-review`; from `devflow:plan` it is `plan-review` **plus
+`--file "$PLAN_PATH"`**, since that phase snapshots the plan file rather than the worktree.
+If it says the tree moved, say so in the report — the reader deserves to know the external
+findings describe an older tree.
 
 ### Step 6: Report
 
@@ -332,7 +318,7 @@ Present findings to user and save report:
 **Scope**: <what was reviewed>
 **Internal reviewer**: <current tool>
 **External reviewer**: <tool name>
-**Result**: APPROVED / APPROVED_WITH_NOTES / NEEDS_USER_DECISION
+**Result**: your verdict in your own words — what you fixed, what you skipped, what needs the user
 **Rounds**: <count — your own recollection; devflow keeps no round counter on disk, so say
 so if a long run makes the number unreliable>
 **Blocking**: <N resolved> / <N open>
@@ -365,7 +351,8 @@ wrong, and recommend the concrete next action for each (ticket, follow-up change
 drop). The user decides — group and propose, never create tickets automatically.
 
 ## Verdict
-APPROVED / CHANGES_REQUESTED / NEEDS_USER_DECISION
+Your call, in one line, with the reasoning: ready as-is / ready with the notes above /
+needs a decision from the user (say which finding and why).
 ```
 
 Create the output directory and save:
@@ -376,61 +363,28 @@ mkdir -p <output_dir>
 
 Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`.
 
-## Iteration (if CHANGES_REQUESTED)
+## Iteration
 
-One round = fix open blocking findings → re-review → re-synthesize. Both modes run the same
-loop; they differ only in who resolves an ambiguity.
+One round = fix the findings you decided to fix → re-review → decide again.
 
-1. **Fix only the open blocking findings.** Non-blocking findings are recorded,
-   not fixed. An unproven finding gets its one bounded check, then a decision from the evidence.
+1. **Fix what you called blocking.** Findings you decided to skip are recorded, not fixed.
 2. **Write the delta brief** — naming each edit, its finding ID, **and re-listing every finding
-   still open with its ID**, so freshly spawned personas can reuse those IDs instead of
-   inventing new ones for the same issue. Personas are new sub-agents every round with no memory
-   of the last one; without that list, a recurring finding comes back under a new ID and looks
-   like progress. The brief is also the round's own record: it is the only place the previous
-   round's open IDs are written down, so keep it accurate.
+   still open with its ID**. Personas are new sub-agents every round with no memory of the last
+   one; without that list a recurring finding comes back under a new ID and looks like progress.
 3. **Re-review the whole board.** Set `CONTINUE=1` so Step 4 keeps the pinned scope, then
-   re-spawn **all** personas (Step 3.8) *and* re-run the external call, both carrying the
-   delta brief. Not just the reviewer that complained — a fix is new code and can carry new
-   defects.
-4. **Re-synthesize** (Step 5). The gate is *anything still blocking after synthesis*, not the
-   reviewers' raw verdict token.
-5. **Repeat while the board is closing.** There is no round cap — a run that is still closing
-   blockers should keep going. What stops it is *lack of progress*, not a number.
+   re-spawn **all** personas (Step 3) *and* re-run the external call if one is configured, both
+   carrying the delta brief. Not just the reviewer that complained — a fix is new code and can
+   carry new defects.
+4. **Decide again** (Step 5), and stop when nothing is left that you consider worth fixing.
 
-**What bounds the loop is the pinned scope, not a counter.** The original runaway happened
-because scope was recomputed from `git diff` every round, so each fix widened what the next
-round reviewed and blockers regenerated forever. `<phase>-scope.txt` is written once and reused;
-that is the structural fix, and it needs no bookkeeping to hold.
+No round cap. What stops a run is lack of progress, not a number: if a round's fixes produce
+new findings instead of closing old ones, or the changeset keeps growing while the findings do
+not shrink, stop and hand the open IDs to the user — that is a decision, not a failure.
 
-Progress is *your* judgment, reported openly — devflow deliberately does not persist an
-open-blocker set to compute it mechanically. An earlier version did, and every round of
-maintaining that state machine introduced more defects into the gate than it caught. Instead,
-each round's delta brief lists the still-open IDs, the report states the round number and the
-open blockers, and a human reads it. When you are unsure whether a round made progress, say so
-and stop — that is what `NEEDS_USER_DECISION` is for.
-
-**Stop as `NEEDS_USER_DECISION`** — a distinct outcome, neither approval nor failure — when:
-
-- a round's fixes produced new blockers instead of closing the old ones, so the board is
-  churning rather than shrinking. Compare against the still-open list in the delta brief you
-  wrote for this round, and name the IDs in the report; or
-- the changeset keeps growing round over round while blockers do not shrink — blockers going
-  down while the diff goes up is the original runaway's signature; or
-- a blocker's only fix needs a new public contract, a cross-cutting refactor, or files
-  outside the pinned scope; or
-- a protected-category finding (security, data loss, reproducible correctness bug) is open
-  and you would have to downgrade it to proceed; or
-- unattended, a downgrade would require judgment rather than mechanical proof (Step 5).
-
-Report the exact finding IDs and the decision needed. Do not keep looping, and do not
-approve around it.
-
-> **APPROVED needs a fresh external reading of the tree being approved** — the freshness
-> invariant in Step 5. You may reclassify what an external reviewer found; you may never
-> certify a change no external reviewer has read. If the external session is unreachable
-> (`run-external` escalated, or no session was ever captured) and the tree has changed since
-> the last successful external call, that is `NEEDS_USER_DECISION`. Never fake APPROVED.
+**What bounds the loop is the pinned scope.** The original runaway happened because scope was
+recomputed from `git diff` every round, so each fix widened what the next round reviewed and
+findings regenerated forever. `<phase>-scope.txt` is written once and reused; that is the
+structural fix, and it needs no bookkeeping to hold.
 
 **Implementation handoff**: If fixes are complex, resume the review session with
 **implementer** settings:
@@ -455,7 +409,7 @@ codex via `--full-auto` — while a reviewer call runs read-only).
 - **Alarming ≠ blocking** — a finding blocks only if this changeset caused it, the evidence is concrete, and a proportional fix fits the scope
 - **Pin the scope once** — a fix must never widen what the next round reviews
 - **Every fix round re-runs every persona**, with a delta brief saying what changed and where to look
-- **APPROVED needs a fresh external reading of this exact tree** — you may reclassify findings, never certify unread code (see Iteration). This skill owns the APPROVED-closure rule; other skills point here.
+- **You decide, the reviewers advise** — read internal + external findings and choose per finding: fix now, or skip with a reason in the report
 - **Nothing is dropped silently** — every raw finding lands in the report with its blocking call, a reason, and a proposed next step
 - **Respect persona tiers** — `deep` personas (Security, Architect) get opus/max; `standard` get sonnet/max
 - **Never blindly accept external review** — cross-reference with your own analysis

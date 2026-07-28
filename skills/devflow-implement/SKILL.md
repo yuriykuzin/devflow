@@ -65,7 +65,9 @@ RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 Read the devflow config the same way as `devflow:plan` Step 1 (merge three layers, each
 overriding the next: `.devflow.yaml` → `~/.devflow/config.yaml` → plugin `config.default.yaml`):
 note `backend`, the `reviewer` and `implementer`
-`model`+`effort`, and `session_reuse` — you pass these to `run-external` as flags.
+`model`+`effort`, and `session_reuse` — you pass these to `run-external` as flags. The reviewing backend is resolved **by host** —
+`external_review.from_<host>` first, `backend:` only as the fallback, `none` = internal personas
+only; see "Which backend reviews" in `skills/using-devflow/SKILL.md`.
 `command_path` stays with the runner (never a flag). See
 `skills/using-devflow/references/cross-tool-runner.md`. Do NOT `dir --fresh` here by default:
 implement chains after plan and must not wipe that run's session / `plan-path`. Only re-run
@@ -294,11 +296,9 @@ a code-review verdict (e.g. "run this to apply the fix", "approve and commit"). 
 
 ### Step 6: Process Review Response
 
-Synthesize the personas' and the external reviewer's findings, then judge — **the gate is
-what still blocks after synthesis, not the reviewer's raw verdict token**. The synthesis
-rules, the four limits on your authority to downgrade a finding (freshness, downgrade-only,
-protected categories, stricter-unattended), and the `NEEDS_USER_DECISION` stop state live in
-`devflow:review` Steps 5 and Iteration — that skill owns them. The summary below is
+Read the personas' and the external reviewer's findings, then decide per finding: fix now, or
+skip with a reason in the report — **your call, not the reviewer's raw verdict token**. How to
+make and record that call lives in `devflow:review` Step 5 and Iteration — that skill owns it. The summary below is
 non-normative: where it and `devflow:review` differ, `devflow:review` wins.
 
 - **Nothing blocking**: done, proceed to Step 7. Record every non-blocking finding with its
@@ -372,7 +372,7 @@ Announce to user:
 ## Autonomy Modes
 
 - **attended**: Pause after superpowers execution for user to inspect. Present external review findings before fixing.
-- **unattended**: Execute plan fully, fix open blocking findings, escalate as `NEEDS_USER_DECISION` when blockers remain unresolved or churn instead of converging, or a downgrade would need judgment rather than mechanical proof (see `devflow:review` Step 5).
+- **unattended**: Execute plan fully, fix open blocking findings, stop as `NEEDS_USER_DECISION` when findings remain unresolved or churn instead of converging.
 
 ## Key Rules
 

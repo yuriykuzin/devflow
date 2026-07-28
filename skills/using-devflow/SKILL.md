@@ -38,14 +38,33 @@ only from the global and default layers — never a project `.devflow.yaml`. See
 
 ## Backend Switching
 
-Devflow supports multiple CLI backends. Switch with one line in config:
+Devflow supports multiple CLI backends. Each has its own section with reviewer/implementer
+settings; see `config.default.yaml` for the full template.
 
 ```yaml
 backend: claude    # or: codex
 ```
 
-Each backend has its own section with reviewer/implementer settings.
-See `config.default.yaml` for the full template.
+### Which backend reviews — resolved by host (canonical)
+
+`backend:` is a fallback, not the answer. The point of an external review is a **different**
+tool's eyes, so the reviewing backend is chosen by which tool is hosting the run:
+
+```yaml
+external_review:
+  from_claude: codex     # hosted by Claude Code → external review via codex
+  from_codex: none       # hosted by Codex → internal personas only
+```
+
+Resolution, in order: `external_review.from_<host>` → `backend:` → shipped default. The host
+is the tool you are running inside — you know it without asking. A host that maps to its own
+backend is a configuration error, not a review: say so and stop rather than asking one tool
+to independently confirm itself.
+
+With `none`, the orchestrator decides from the internal personas' findings alone. Record in the
+report which resolution was used, so a reader can tell an internal-only review from one where
+an external call was configured and skipped. The implementer backend for handoff calls still
+comes from `backend:`; `none` only suppresses the external *review*.
 
 ## How Cross-Tool Calls Work
 
