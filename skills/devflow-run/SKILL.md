@@ -102,7 +102,7 @@ digraph run {
 RUN_DIR="$(bash "$RUNNER" dir --fresh | sed -n 's/^RUN_DIR=//p')"
 ```
 
-`RUN_DIR` is deterministic per project (a hash of the repo root under `${TMPDIR:-/tmp}`,
+`RUN_DIR` is deterministic per project (a hash of the repo root under `$HOME/.devflow/run`,
 never inside the repo), so every phase — even in a fresh Bash call with no inherited shell
 state — reconstructs the same `RUN_DIR` with a plain `bash "$RUNNER" dir` and shares its
 files: the plan path, the pre-implementation base, and each phase's review-session id.
@@ -135,7 +135,7 @@ Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
 `$RUN_DIR/plan-review.session`. This carries context to Phase 2.
 
 **In attended mode**: After plan is finalized, present summary to user:
-> "Phase 1 complete. Plan saved to `<path>`. External review: APPROVED after N iterations. Proceed to implementation?"
+> "Phase 1 complete. Plan saved to `<path>`. External review: APPROVED after N rounds. Proceed to implementation?"
 
 **In unattended mode**: Proceed directly to Phase 2.
 
@@ -164,9 +164,20 @@ Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
 - External cross-tool review
 - Combined report
 
-**This is the final quality gate.** On a CHANGES_REQUESTED verdict:
+**This is the final quality gate.** The gate is *open `must_fix_now` findings after
+synthesis* — not a reviewer's raw verdict token. On open blockers:
 - **attended**: Present to user for decision
-- **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review loop and the APPROVED-closure rules (external re-review by default; a narrow verified-fixed fallback only when the session is unreachable *and* every finding is mechanically verifiable; an internal-only re-review never counts). It iterates without a fixed cap and, if blocked with no progress, records the unresolved issues and leaves the phase CHANGES_REQUESTED — it will not loop indefinitely. Do not restate or override those rules here.
+- **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review
+  loop and the APPROVED-closure rules (each round re-runs every persona plus the external
+  reviewer with a delta brief; APPROVED requires a fresh external reading of the exact tree
+  being approved; unattended downgrades must be mechanically provable). It runs while the
+  blockers are closing — no round cap — and stops as `NEEDS_USER_DECISION` when a round's fixes
+  produce new blockers instead, or a fix would break the pinned scope. Do not restate or
+  override those rules here.
+
+**`NEEDS_USER_DECISION` propagates up.** It is neither approval nor failure: end the run,
+report it as the pipeline status with the exact finding IDs and the decision needed, and do
+not start another phase or another round around it.
 
 ### Step 4: Final Report
 
@@ -181,21 +192,27 @@ Generate a comprehensive report summarizing the entire pipeline:
 **External reviewer**: <tool name>
 
 ## Phase 1: Planning
-- **Status**: Complete
+- **Status**: Complete / NEEDS_USER_DECISION
 - **Plan**: `<path>`
-- **Review iterations**: N
+- **Rounds**: N
+- **Blockers (`must_fix_now`)**: N (resolved) / N open
+- **Not actioned**: N deferred + N out-of-scope — see the phase report's "Not actioned" table
 - **Duration**: ~Xm
 
 ## Phase 2: Implementation
-- **Status**: Complete
+- **Status**: Complete / NEEDS_USER_DECISION
 - **Files changed**: N
-- **Review iterations**: N
+- **Rounds**: N
+- **Blockers (`must_fix_now`)**: N (resolved) / N open
+- **Not actioned**: N deferred + N out-of-scope — see the phase report's "Not actioned" table
 - **Duration**: ~Xm
 
 ## Phase 3: Final Review
-- **Status**: Approved / Approved with notes
-- **Critical issues**: 0
-- **Important issues**: N (resolved)
+- **Status**: Approved / Approved with notes / NEEDS_USER_DECISION
+- **Rounds**: N
+- **Blockers (`must_fix_now`)**: N (resolved) / N open
+- **Not actioned**: N deferred + N out-of-scope — see the review report's
+  "Not actioned" table for each finding, why it was not fixed, and the proposed next step
 - **Report**: `<path>`
 
 ## Summary
@@ -245,6 +262,6 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 - **Report everything** — save reports for audit trail
 - **Superpowers skills do the heavy lifting** — devflow orchestrates between tools
 - **Model tiers matter** — reviewer effort ≥ implementer (claude: `max` review / `high` impl; codex: `high` for both)
-- **RUN_DIR is deterministic per project** (a hash of the repo root under `${TMPDIR:-/tmp}`); every phase reconstructs it with `bash "$RUNNER" dir` and shares its files (plan path, impl base, session ids) — no shell inheritance. Config is read from `.devflow.yaml` and passed to `run-external` as flags; the codex binary is resolved by the runner from trusted config only
+- **RUN_DIR is deterministic per project** (a hash of the repo root under `$HOME/.devflow/run` — deliberately not `$TMPDIR`, a write-mode call's writable root; `DEVFLOW_RUN_HOME` overrides it, for the test harness); every phase reconstructs it with `bash "$RUNNER" dir` and shares its files (plan path, impl base, session ids) — no shell inheritance. Config is read from `.devflow.yaml` and passed to `run-external` as flags; the codex binary is resolved by the runner from trusted config only
 - **External calls are non-blocking** — `run-external` backgrounds its own child process and polls internally; no 2-min-timeout deaths. On Claude Code, launch the `run-external` call itself with the Bash tool's `run_in_background: true` rather than polling in a loop (see cross-tool-runner.md's async-execution guidance)
 - **Session reuse saves tokens** — ~20k tokens saved per resumed iteration

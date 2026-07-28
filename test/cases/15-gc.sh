@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # `dir` opportunistically GCs stale sibling run dirs. RUN_DIR is keyed on the git top-level,
 # so a worktree-per-feature workflow mints a fresh hash every run and completed dirs would
-# pile up in $TMPDIR forever. On each `dir` call the runner reclaims a sibling devflow-run.*
+# pile up under $HOME/.devflow/run forever. On each `dir` call the runner reclaims a sibling devflow-run.*
 # dir only when it is OURS (uid) + IDLE (no live PID under .pids/) + OLD (mtime past TTL,
 # default DEVFLOW_RUN_TTL_DAYS=7) — never the current one, never a live run, and a non-numeric
 # TTL disables the sweep. The liveness gate is the critical safety property: mtime alone is an
@@ -11,10 +11,13 @@ set -u
 . "$LIB/assert.sh"; . "$LIB/sandbox.sh"
 
 mk_sandbox
-# Reroot the whole run-dir family under a sandbox-local $TMPDIR before the first `dir` call,
-# so the GC sweep can only ever touch dirs THIS test made — never a developer's real run dirs
-# in the shared /tmp. RUN_DIR is derived from ${TMPDIR:-/tmp}, so exporting it here is enough.
-export TMPDIR="$SB/rtmp"; mkdir -p "$TMPDIR"
+# Reroot the whole run-dir family under a sandbox-local directory before the first `dir` call, so
+# the GC sweep can only ever touch dirs THIS test made — never a developer's real run dirs.
+# DEVFLOW_RUN_HOME is the override the runner reads for exactly this purpose (RUN_DIR is under
+# $HOME/.devflow/run, deliberately NOT under $TMPDIR — see the Security section of
+# cross-tool-runner.md); the sandbox HOME alone would also isolate it, but naming the root here
+# keeps the sweep's blast radius visible in the test.
+export DEVFLOW_RUN_HOME="$SB/rtmp"; mkdir -p "$DEVFLOW_RUN_HOME"
 run_dir_here
 
 parent="$(dirname "$RUN_DIR")"
@@ -47,5 +50,5 @@ is "$rc2" "0"        "dir succeeds with GC disabled"
 ok "[ -d '$old' ]"   "non-numeric DEVFLOW_RUN_TTL_DAYS disables GC (stale sibling survives)"
 
 rm -f "$live/.pids/$$"    # drop the live marker before teardown reaps the tree
-cleanup_sandbox           # rm -rf "$SB" reclaims $TMPDIR=$SB/rtmp and every dir under it
+cleanup_sandbox           # rm -rf "$SB" reclaims $DEVFLOW_RUN_HOME=$SB/rtmp and every dir under it
 report

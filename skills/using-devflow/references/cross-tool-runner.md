@@ -52,9 +52,11 @@ and the filesystem do).
 
 ## RUN_DIR is deterministic
 
-`RUN_DIR` is a hash of `git rev-parse --show-toplevel`, rooted under `${TMPDIR:-/tmp}` — not
-inside the repo tree (a tracked, clone-delivered file at a predictable in-repo path would be
-a same-day RCE — see "Security"). It never depends on an exported env var or a `mktemp`
+`RUN_DIR` is a hash of `git rev-parse --show-toplevel`, rooted under `$HOME/.devflow/run`
+(override: `DEVFLOW_RUN_HOME`, which exists for the test harness) — not inside the repo tree (a
+tracked, clone-delivered file at a predictable in-repo path would be a same-day RCE — see
+"Security"), and deliberately **not** under `${TMPDIR:-/tmp}` either, because that is a default
+writable root of a write-mode `--role implementer` call — see "Security". It never depends on an exported env var or a `mktemp`
 pointer, so every subcommand reconstructs it identically with no shared state. It's a hash,
 not something to hand-recompute in a one-liner (matching the script's hash-tool fallback
 chain byte-for-byte is a drift trap). When *you* need `$RUN_DIR` in a fresh Bash call, get
@@ -92,8 +94,8 @@ stale-session error.
 Every `dir` call also opportunistically GCs *abandoned sibling* run dirs. This matters because
 `RUN_DIR` is keyed on the git top-level: a worktree-per-feature workflow mints a fresh hash
 every run, so `--fresh` reuse never reclaims them and they would otherwise pile up in
-`${TMPDIR:-/tmp}` forever. A sibling is reclaimed only when it is all three of: **ours** (uid
-match — never another user's dir on a shared `/tmp`), **idle** (no live PID leased under
+`$HOME/.devflow/run` forever. A sibling is reclaimed only when it is all three of: **ours** (uid
+match — never another user's dir on a shared parent), **idle** (no live PID leased under
 `.pids/` — the same liveness test `dir --fresh` honours, so a running call is never reclaimed
 even if its dir looks old), and **old** (dir mtime more than `DEVFLOW_RUN_TTL_DAYS` full days
 ago; default 7, rounded down). The age is measured from last *use*, not creation — every
@@ -117,6 +119,8 @@ extracts the verdict text and session id, and prints a small `KEY=VALUE` report.
 | `--role reviewer\|implementer` | no (default `reviewer`) | `reviewer` runs the backend read-only; `implementer` gets workspace-write. This alone sets the write posture — the runner derives it (claude `--permission-mode plan`/`default`, codex read-only/`--full-auto`); there is no separate permission flag. Does NOT pick the model — you pass that explicitly |
 | `--resume <session-id>` | no | resume that session instead of starting fresh. An **empty value is legal and means "fresh"**, so pass it unconditionally — see below |
 | `--no-session-reuse` | no | ephemeral call — no session persisted |
+| `--freshness` | no | snapshot the worktree before the call and record it as "what the reviewer read" — only if the call yields a usable verdict (see below) |
+| `--freshness-file <path>` | no | same, but the reviewed artefact is one file (plan review) rather than the worktree |
 
 The binary that actually runs (and the rate-limit `fallback_command`) is resolved by the
 script itself from the trusted config only — you never pass a binary path. `--model` /
@@ -133,6 +137,8 @@ bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFF
 #   VERDICT_FILE=<path to the full verdict text>
 #   SESSION_ID=<id, or empty>
 #   SESSION_FILE=<path — read this to resume next iteration>
+#   TREE_FILE=<path to the recorded snapshot>   (only with --freshness/--freshness-file)
+#   ROUND=<how many reviewed rounds this phase has had>   (same)
 ```
 
 There is deliberately **no machine-parsed verdict status**. You are the orchestrator (an
@@ -176,6 +182,63 @@ arrives as a single `--resume <id>` argument and the runner rejects it with
 `run-external: unknown flag`, exit 2, so every resumed iteration fails to launch. Host agents run
 these snippets through whatever shell their Bash tool uses (zsh on macOS), so the quoted,
 unconditional form is the only portable one.
+
+### `fence-delta --file <path>`
+
+Prints the delta brief as a nonce-fenced block on stdout — the block a re-review round appends
+*after* the prompt body. No brief (missing or empty file) prints nothing and exits 0, so callers
+splice `"$(bash "$RUNNER" fence-delta --file …)"` unconditionally; a non-empty file that cannot be
+read is exit 2, never a silent empty block (that would drop the still-open finding IDs).
+
+Two properties are the whole point. The fence carries a fresh 12-hex-digit nonce per call, because
+the brief quotes untrusted file content verbatim and a model honours a near-miss terminator — a
+static `--- END DELTA BRIEF ---` can be closed by the quoted content itself, after which the rest
+reads as orchestrator voice. And any `END DELTA BRIEF` variant inside the brief is **neutralized
+in place**, never dropped: the brief is the only record of still-open finding IDs, so deleting a
+line silently retires a finding, which then returns under a new ID and reads as progress. This
+lived inline in three SKILL.md files and the copies drifted; the skills now call the subcommand.
+
+### `freshness-check --phase <p> [--file <path>]`
+
+The other half of `--freshness`. Answers one question: **is the code I am about to approve the
+same code the external reviewer actually read?** Without it an orchestrator can review a tree,
+"fix" a finding, and approve the result — a verdict on code nobody reviewed.
+
+The snapshot is content, not status: `HEAD` + `git status --porcelain` + `git diff HEAD` + the
+contents of every untracked file. A status-only snapshot would miss the most common case — a
+second edit to an already-modified file leaves `git status` byte-identical.
+
+`--freshness` writes the snapshot to `$RUN_DIR/<phase>.tree.pending` **before** the call and
+promotes it to `<phase>.tree` only when the call produced a usable verdict; a failed, killed or
+verdict-less call deletes the pending file instead. So no `.tree` ever means "nothing was
+reviewed", never "reviewed and unchanged". Pass `--file` here whenever the call used
+`--freshness-file`, **with the same path** — the two flavours snapshot different things, so a
+worktree check against a single-file `.tree` reports `tree-changed` forever.
+
+What a fresh `.tree` proves, exactly: the tree on disk did not change between a completed
+external call and this check. It does not prove the reviewer re-read anything (a resumed
+session can answer from prior context), and the skills that write the snapshot can also delete
+it. This is fail-closed hygiene against the orchestrator's own drift, not a boundary against a
+hostile orchestrator.
+
+```bash
+bash "$RUNNER" freshness-check --phase final-review
+```
+
+| Exit | stdout | Meaning |
+|------|--------|---------|
+| 0 | `FRESH=yes` | still the reviewed tree — nothing drifted since the verdict |
+| 1 | `FRESH=no` `REASON=tree-changed` | something changed since the review — re-review before approving |
+| 2 | `FRESH=no` `REASON=no-tree` | no call ever completed for this phase → not reviewed, so never APPROVED; report `NEEDS_USER_DECISION` |
+
+Both flags are opt-in so plain calls stay cheap, but any skill whose output is an APPROVED /
+CHANGES_REQUESTED verdict should use them. Exit 2 also covers usage errors, so read `REASON=`
+rather than keying only on the code. `<phase>` must match `[A-Za-z0-9._-]+` and cannot be `.`
+or `..` (it is a filename component); a missing `--phase`, an unknown flag, a `--file` /
+`--freshness-file` path that does not exist, or `--freshness` on a `--role implementer` call
+(a write-mode call must not certify its own output) is a hard argument error, never a silently
+wrong snapshot. `--freshness` on a repo it cannot read exits 1 rather than recording an empty
+snapshot.
 
 ## Config: what to read, and pass as flags
 
@@ -231,17 +294,46 @@ Example SCOPE block:
 
 ```
 SCOPE: Review ONLY this changeset. Inspect it with: git diff HEAD -- <files>
+Baseline: <the commit the changeset starts from, or "unresolved">
 Files in scope:
 <the file list + any untracked files>
-Anything outside this changeset -> list under OUT_OF_SCOPE and do NOT block on it.
+Anything outside this changeset, EXCEPT files created or edited by a fix round of
+this same review, -> list under OUT_OF_SCOPE and do NOT block on it.
+Files created or edited by a fix round ARE in scope for defects and MAY block; they
+do not widen the scope for new design suggestions.
 ```
+
+**Pin the block once, then reuse it.** Write it to `$RUN_DIR/<phase>-scope.txt` on the first
+round and read that same file on every re-review; regenerate it only for a genuinely new
+review. This is the one thing that bounds the fix → re-review loop. Recomputing scope from
+`git diff` each round is what made an early devflow run diverge: every fix widened the next
+round's scope, so the reviewer kept finding new blockers in the fixes and the loop never
+closed. Keyed on an explicit `CONTINUE=1` marker — never inferred from mode, baseline, or file
+overlap, all of which look identical on round 1 and round 4.
+
+The `Baseline:` line is what later lets a finding be shown to be pre-existing rather than
+introduced. Record the resolved SHA if you have one; the fix-round carve-out is there because
+a file your own fix created is unreviewed code — it must be able to block, even though it was
+not in the original changeset.
 
 ## Security
 
-`RUN_DIR` lives under `${TMPDIR:-/tmp}`, not inside the repo — a hostile clone must never be
-able to *deliver* a tracked file into a path the script later reads. `RUN_DIR` is created
-mode 0700 with an ownership + symlink check before anything touches it, closing the
-predictable-shared-`/tmp`-path pre-planting attack.
+`RUN_DIR` lives under `$HOME/.devflow/run`, not inside the repo — a hostile clone must never be
+able to *deliver* a tracked file into a path the script later reads. `RUN_DIR` and its parent are
+created mode 0700 with an ownership + symlink check before anything touches it, closing the
+predictable-path pre-planting attack.
+
+It is **not** under `${TMPDIR:-/tmp}`, and that is a gate property, not tidiness. `RUN_DIR` holds
+`<phase>.tree` and `<phase>-verdict.txt`, the two artifacts `freshness-check` trusts, while a
+`--role implementer` call runs the backend in *write* mode: `codex --full-auto` is
+`sandbox_mode=workspace-write`, whose default writable roots include `$TMPDIR` and `/tmp` (hence
+the CLI's own `exclude_tmpdir_env_var` / `exclude_slash_tmp` knobs), and
+`claude --permission-mode default` has no OS sandbox at all. With the artifacts in `$TMPDIR`, a
+fix call — or any injected instruction inside the untrusted code it was told to fix — could write
+its own `APPROVED` and a matching snapshot, and the next `freshness-check` would bless it: the
+reviewer-only guard would be decorative. The role-derived write posture is the *first* control,
+the artifact location is the one that does not depend on the backend honouring a flag; the codex
+implementer branch also passes both `exclude_*` overrides as belt.
 
 `codex.command_path` and `codex.fallback_command` — the two config keys that name an
 executable to run — are resolved **only** from the plugin default and
@@ -249,6 +341,30 @@ executable to run — are resolved **only** from the plugin default and
 script (never via a flag you pass). A committed project config choosing `backend` / models /
 `session_reuse` is fine; a committed project config choosing *which binary gets executed* is
 not — that's a clone shipping its own payload and pointing devflow at it.
+
+A configured `command_path` is therefore also **never silently substituted**. When it is set it
+is the *only* candidate: **any** reason it does not work is fatal — absent, not executable
+(`is missing or not executable`), or failing the `exec --help | grep -- --json` capability probe
+(`did not pass the 'exec --json' probe`). The auto-resolve list
+(`/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, `which -a codex`) is reached only when
+`command_path` is empty. Falling through would hand the *choice of executable* back to the
+environment — in the test harness that is exactly what happened: the stub's probe hiccuped and
+the real network-calling `codex` CLI ran in its place, which read as a random test flake. The
+first version of this guard checked only the probe, so a **dangling** path (a moved install, a
+typo — the likelier misconfiguration) was skipped by the `[ -x ]` filter and substituted anyway;
+both failure modes are now refused, each with its own message and next step.
+
+Relatedly, `devflow-json.py` (the verdict/session extractor the script shells out to) uses
+exit **3** for "ran, nothing usable in this stream" — the fail-closed answer — and leaves every
+other non-zero code to mean "the extractor could not run at all", including **2** for a wrong
+argv (devflow miscalling its own helper: a caller bug, not a reviewer producing nothing).
+`run-external` reports the two classes differently (`WARN — the verdict extractor could not run
+(rc=N)` vs. a reviewer that produced nothing). Both still fail closed; only one of them is a
+reason to retry the call rather than to go read the reviewer's verdict. That WARN is also the
+*first* thing `devflow_after_call` checks — it is the only positively known cause there, ahead of
+the rate-limit/auth substring guesses — and the extractor's own stderr goes to
+`<phase>-extractor-stderr.txt`, not the backend's `<phase>-stderr.txt`, so a python traceback can
+never be grepped as the backend's words.
 
 ## Async execution — how to launch `run-external`
 
@@ -270,15 +386,23 @@ RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 
 # 2) read config from .devflow.yaml -> BACKEND / MODEL / EFFORT (reviewer block here)
 
-# 3) build the SCOPE block from plain git (mode table above)
-#    ... assemble "$SCOPE_BLOCK" ...
+# 3) pin the SCOPE block once (reuse $RUN_DIR/plan-review-scope.txt on a CONTINUE=1 round)
+#    ... assemble it from plain git, mode table above ...
 
-# 4) write the prompt and make the call
-printf '%s\n\n%s\n' "$SCOPE_BLOCK" "$REVIEW_PROMPT_BODY" > "$RUN_DIR/prompt.txt"
+# 4) write the prompt and make the call. This example is the PLAN phase, whose review target is
+#    one file — hence --freshness-file. A worktree review (impl-review / final-review) passes a
+#    bare --freshness instead. The two are not interchangeable: whichever one the call used, the
+#    check in step 6 must match it.
+printf '%s\n\n%s\n' "$(cat "$RUN_DIR/plan-review-scope.txt")" "$REVIEW_PROMPT_BODY" > "$RUN_DIR/prompt.txt"
 RESUME_ID="$(cat "$RUN_DIR/plan-review.session" 2>/dev/null)"   # empty on first iteration
 bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
-  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt" --resume "$RESUME_ID"
+  --phase plan-review --prompt-file "$RUN_DIR/prompt.txt" --resume "$RESUME_ID" \
+  --freshness-file "$PLAN_PATH" \
+  || { echo "devflow: no usable review -> NEEDS_USER_DECISION, not a verdict" >&2; exit 1; }
 
 # 5) read results
 cat "$RUN_DIR/plan-review-verdict.txt"    # full verdict text
+
+# 6) before emitting APPROVED, prove you are approving what was reviewed
+bash "$RUNNER" freshness-check --phase plan-review --file "$PLAN_PATH"   # 0 fresh / 1 changed / 2 never reviewed
 ```

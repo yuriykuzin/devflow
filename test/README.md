@@ -65,12 +65,11 @@ suite fast and dependency-free — a deliberate minimalism trade-off):
   NO real-CLI validation at any level: `fake-claude`'s assumed `.result`/`.session_id` JSON
   shape and its flag set (`--permission-mode`, `--effort`, `--resume`,
   `--no-session-persistence`) are unverified against a real `claude` binary.
-- **`devflow-json.py` fail-closed paths** — not exercised by any case, direct or indirect.
-  Every real `run-external` invocation in the suite feeds the extractor only well-formed
-  input; the hang/timeout scenarios return (exit 124) before the extractor runs at all, and
-  the `ratelimit`/`auth` stub modes are only fed to `devflow_after_call` directly (bypassing
-  the extractor). Its behavior on malformed/truncated JSON, a `turn.failed`/`is_error` stream,
-  or a session id failing the strict-token check is untested.
+- **`devflow-json.py` fail-closed paths** — partly covered as of `55-guards.sh`, which calls
+  the extractor directly and asserts its exit-code contract (3 = ran, nothing usable; 2 = wrong
+  argv; 0 = value) for a stream with no `turn.completed` and for an unreadable input, plus one
+  `run-external` call whose extractor cannot run at all. Still untested: a `turn.failed` /
+  `is_error` stream, and a session id failing the strict-token check.
 - **Concurrency races** — `25-pid-guard` checks the `.pids` lease refuses a `dir --fresh`
   wipe, but genuinely-concurrent `run-external` calls sharing one RUN_DIR (same checkout) are
   not stress-tested; the documented guarantee is worktree = safe-parallel, same-checkout = serial.

@@ -59,7 +59,9 @@ run_dir_here(){
 # environment — set them inline: `FAKE_CODEX_MODE=ok rx --phase p --prompt-file f`.
 rx(){ ( cd "$REPO_FX" && bash "$RUNNER" run-external --backend codex --model gpt-5.5 --effort high "$@" ); }
 
-# RUN_DIR now lives under ${TMPDIR:-/tmp}/devflow-run.<hash> — OUTSIDE $SB (unlike the
-# old in-repo `.devflow/run`, which `rm -rf "$SB"` cleaned up as a side effect). Remove it
-# explicitly so sandboxed test runs don't leak hashed run dirs into the real $TMPDIR.
+# RUN_DIR lives under $HOME/.devflow/run/devflow-run.<hash> (NOT $TMPDIR — a write-mode
+# implementer call's writable root; see cross-tool-runner.md "Security"). HOME is sandboxed, so it
+# lands inside $SB — but the removal below stays explicit, because a case that overrides
+# DEVFLOW_RUN_HOME (15-gc) or HOME would otherwise leak a hashed run dir. Formerly the dir was
+# in $TMPDIR, outside $SB entirely, which is why this explicit cleanup exists at all.
 cleanup_sandbox(){ [ -n "${RUN_DIR:-}" ] && rm -rf "$RUN_DIR"; [ -n "${SB:-}" ] && rm -rf "$SB"; }

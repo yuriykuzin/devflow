@@ -8,8 +8,20 @@ import sys
 SESSION_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
+# Exit 3 means "I ran, and the input does not yield a usable value" — the fail-closed answer.
+# It must NOT share an exit code with "python could not run this script at all" (1/126/127 and
+# uncaught tracebacks), because the caller turns a non-zero exit into an empty result: without a
+# distinct code, a transient interpreter failure is indistinguishable from a reviewer that
+# produced nothing, and a perfectly good review gets reported as an unusable call.
 def fail():
-    raise SystemExit(1)
+    raise SystemExit(3)
+
+
+# A wrong argv is devflow calling its own helper wrong — a "could not run" cause, not an input
+# that yielded nothing. Sharing 3 with the content side would report a perfectly good review as an
+# empty verdict, with no WARN, the moment a caller renames a field or adds one.
+def usage():
+    raise SystemExit(2)
 
 
 def codex(path):
@@ -61,7 +73,7 @@ def claude(path):
 
 def main():
     if len(sys.argv) != 4 or sys.argv[1] not in {"codex", "claude"} or sys.argv[2] not in {"result", "session"}:
-        fail()
+        usage()
     try:
         result, session = codex(sys.argv[3]) if sys.argv[1] == "codex" else claude(sys.argv[3])
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):

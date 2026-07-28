@@ -57,7 +57,20 @@ is "$(kv "$out" EXIT)" "124" "process that never completes hits the hard cap (ex
 ok "[ $dur -lt 15 ]" "hard-cap path bounded (did not hang); took ${dur}s"
 session_file="$(kv "$out" SESSION_FILE)"
 ok "[ -f \"$session_file\" ]" "hard-cap path still writes SESSION_FILE (output contract holds even on timeout)"
-ok "[ ! -s \"$session_file\" ]" "hard-cap path's SESSION_FILE is empty (no session captured)"
+# A hard-cap kill captures no id of its own, but it must NOT blank the id an earlier round
+# captured (the `ok` call above did): that would read as "this review never had a session",
+# which the skills treat as grounds for self-certifying without an external re-review.
+is "$(cat "$session_file")" "thread_test_abc123" "hard-cap path keeps the previously captured session id"
+
+# --- the OTHER half of that contract: a hard cap on the FIRST call of a phase, with no id ever
+# captured, must CREATE an empty session file and must not claim it kept anything. Asserting only
+# the keep-the-id half would let a regression that seeds garbage into a fresh session file pass —
+# and an id that appears out of nowhere is exactly what the skills read as "resume is possible".
+out="$(FAKE_CODEX_MODE=hang rx --phase never-called --prompt-file "$PROMPT_FILE" 2>&1)"
+first_sf="$(kv "$out" SESSION_FILE)"
+ok "[ -f \"$first_sf\" ]" "a first-call hard cap still creates SESSION_FILE"
+ok "[ ! -s \"$first_sf\" ]" "...and leaves it empty (no id was ever captured)"
+hasnt "$out" "keeping the previously captured one" "...without claiming it preserved an id"
 
 # --- verdict is passed through verbatim (no machine parse): the runner writes the reviewer's
 #     text to VERDICT_FILE untouched, for the orchestrator LLM to read and judge itself. ---

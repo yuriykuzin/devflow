@@ -61,7 +61,18 @@ is "$(kv "$out" EXIT)" "124" "claude process that never exits hits the hard cap 
 ok "[ $dur -lt 15 ]" "hard-cap path bounded (did not hang); took ${dur}s"
 session_file="$(kv "$out" SESSION_FILE)"
 ok "[ -f \"$session_file\" ]" "hard-cap path still writes SESSION_FILE (output contract holds even on timeout)"
-ok "[ ! -s \"$session_file\" ]" "hard-cap path's SESSION_FILE is empty (no session captured)"
+# A hard-cap kill captures no id of its own, but it must NOT blank the id an earlier round
+# captured (the `ok` call above did): that would read as "this review never had a session",
+# which the skills treat as grounds for self-certifying without an external re-review.
+is "$(cat "$session_file")" "claude_test_session_xyz" "hard-cap path keeps the previously captured session id"
+
+# --- the OTHER half: a hard cap on the FIRST call of a phase captured no id, so SESSION_FILE must
+# exist and be EMPTY, with no "kept the previous one" claim. Same contract as the codex case.
+out="$(FAKE_CLAUDE_MODE=hang cx --phase never-called --prompt-file "$PROMPT_FILE" 2>&1)"
+first_sf="$(kv "$out" SESSION_FILE)"
+ok "[ -f \"$first_sf\" ]" "a first-call hard cap still creates SESSION_FILE"
+ok "[ ! -s \"$first_sf\" ]" "...and leaves it empty (no id was ever captured)"
+hasnt "$out" "keeping the previously captured one" "...without claiming it preserved an id"
 
 cleanup_sandbox
 report
