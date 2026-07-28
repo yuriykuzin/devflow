@@ -97,18 +97,20 @@ do_choose() {
 integrations:
   codex: true
   claude-code: true
+  opencode: true
   # cursor: true
   # gemini: true
 EOF
   fi
 
-  local tools=("codex" "claude-code")
-  local labels=("Codex CLI" "Claude Code")
+  local tools=("codex" "claude-code" "opencode")
+  local labels=("Codex CLI" "Claude Code" "opencode")
   local detected=()
 
   # Detect available tools
   command -v codex >/dev/null 2>&1 && detected+=("codex") || true
   [ -d "$HOME/.claude" ] && detected+=("claude-code") || true
+  { command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; } && detected+=("opencode") || true
 
   echo "Available tools:"
   echo ""
@@ -373,15 +375,36 @@ else:
     echo "  · skipped (disabled in config)"
   fi
 
-  # 3. Cursor
+  # 3. opencode — a flat skills dir: one symlink PER SKILL, not one for the whole tree.
+  #    opencode discovers ~/.config/opencode/skills/<name>/SKILL.md, so a single
+  #    skills/ -> devflow/skills symlink would hide every skill one level too deep.
+  echo "opencode:"
+  if integration_enabled "opencode"; then
+    if command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; then
+      mkdir -p "$HOME/.config/opencode/skills"
+      for skill_dir in "$DEVFLOW_HOME"/skills/*/; do
+        [ -d "$skill_dir" ] || continue
+        local skill_name
+        skill_name="$(basename "$skill_dir")"
+        symlink_or_skip "${skill_dir%/}" "$HOME/.config/opencode/skills/$skill_name" \
+          "~/.config/opencode/skills/$skill_name"
+      done
+    else
+      echo "  · not detected — skipped"
+    fi
+  else
+    echo "  · skipped (disabled in config)"
+  fi
+
+  # 4. Cursor
   echo "Cursor:"
   echo "  ✓ reads from $DEVFLOW_HOME directly (no setup needed)"
 
-  # 4. Gemini CLI
+  # 5. Gemini CLI
   echo "Gemini CLI:"
   echo "  ✓ reads from $DEVFLOW_HOME directly (no setup needed)"
 
-  # 5. Config
+  # 6. Config
   echo "Config:"
   if [ ! -f "$HOME/.devflow/config.yaml" ]; then
     mkdir -p "$HOME/.devflow"
@@ -407,6 +430,21 @@ do_uninstall() {
   [ -L "$HOME/.agents/skills/devflow" ] && rm "$HOME/.agents/skills/devflow" \
     && echo "  ✓ removed Codex symlink" \
     || echo "  · Codex: not installed"
+
+  # opencode — one symlink per skill; only remove links that point into devflow, so a
+  # same-named skill the user installed from elsewhere is left alone.
+  local oc_dir="$HOME/.config/opencode/skills" oc_removed=0
+  if [ -d "$oc_dir" ]; then
+    for link in "$oc_dir"/*; do
+      [ -L "$link" ] || continue
+      case "$(readlink "$link")" in
+        "$DEVFLOW_HOME"/skills/*|"$INSTALL_DIR"/skills/*|"$HOME"/.claude/plugins/cache/"$CLAUDE_MKT"/*)
+          rm "$link"; oc_removed=$((oc_removed+1)) ;;
+      esac
+    done
+  fi
+  [ "$oc_removed" -gt 0 ] && echo "  ✓ removed $oc_removed opencode skill symlink(s)" \
+    || echo "  · opencode: not installed"
 
   # Claude Code — remove marketplace, cache, and registrations
   local mkt_dir="$HOME/.claude/plugins/marketplaces/$CLAUDE_MKT"
@@ -490,6 +528,22 @@ assert '$plugin_key' in d.get('plugins', {})
     fi
   else
     echo "  ✗ Claude Code: not installed"
+  fi
+
+  # opencode
+  local oc_dir="$HOME/.config/opencode/skills" oc_n=0
+  if [ -d "$oc_dir" ]; then
+    for link in "$oc_dir"/*; do
+      [ -L "$link" ] || continue
+      case "$(readlink "$link")" in
+        */devflow/skills/*|*/devflow-local/devflow/*/skills/*) oc_n=$((oc_n+1)) ;;
+      esac
+    done
+  fi
+  if [ "$oc_n" -gt 0 ]; then
+    echo "  ✓ opencode:    $oc_n skill(s) linked in ~/.config/opencode/skills"
+  else
+    echo "  ✗ opencode:    not installed"
   fi
 
   # Cursor

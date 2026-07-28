@@ -117,5 +117,6 @@ review_personas:
 integrations:
   codex: true
   claude-code: true
+  opencode: true
   # cursor: true       # auto-detected from repo — no install step needed
   # gemini: true       # auto-detected from repo — no install step needed

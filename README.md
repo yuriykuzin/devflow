@@ -2,7 +2,7 @@
 
 [![test](https://github.com/yuriykuzin/devflow/actions/workflows/test.yml/badge.svg)](https://github.com/yuriykuzin/devflow/actions/workflows/test.yml)
 
-Automates the planning → implementation → review pipeline across multiple AI coding tools (Claude Code, Codex CLI, Gemini CLI, Cursor).
+Automates the planning → implementation → review pipeline across multiple AI coding tools (Claude Code, Codex CLI, opencode, Gemini CLI, Cursor).
 
 ## How It Works
 
@@ -56,6 +56,14 @@ ln -s /path/to/devflow/skills ~/.agents/skills/devflow
 claude --plugin-dir /path/to/devflow
 ```
 
+**opencode** — one symlink **per skill**, because opencode discovers
+`~/.config/opencode/skills/<name>/SKILL.md` and a single link to the whole `skills/` tree
+would bury every skill one level too deep:
+```bash
+mkdir -p ~/.config/opencode/skills
+for d in /path/to/devflow/skills/*/; do ln -s "${d%/}" ~/.config/opencode/skills/"$(basename "$d")"; done
+```
+
 **Cursor** — reads plugin manifest from the repo directly (no setup needed).
 
 **Gemini CLI** — reads `GEMINI.md` and `gemini-extension.json` from the repo directly.
@@ -72,7 +80,7 @@ cp /path/to/devflow/config.default.yaml ~/.devflow/config.yaml
 cd /path/to/devflow && git pull
 ```
 
-Codex, Cursor, and Gemini use symlinks or direct reads — changes propagate instantly.
+Codex, opencode, Cursor, and Gemini use symlinks or direct reads — changes propagate instantly.
 Claude Code uses a cached copy — re-run `install.sh` after pulling to update the cache.
 
 ## Uninstalling
@@ -111,19 +119,24 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 Global config: `~/.devflow/config.yaml`
 Project override: `.devflow.yaml` in project root
 
-### Switching Providers
+### Which tool reviews
 
-To switch between Claude Code and Codex as the external reviewer/implementer, change **one line** in `~/.devflow/config.yaml`:
+The point of an external review is a **different** tool's eyes, so the reviewing backend is
+picked by which tool is hosting the run — not by one global switch:
 
 ```yaml
-# Use Claude Code (opus for reviews, sonnet for implementation)
-backend: claude
-
-# Use Codex CLI (gpt-5.5 for both)
-backend: codex
+external_review:
+  from_claude: codex     # hosted by Claude Code → external review via codex
+  from_codex: none       # hosted by Codex → internal personas only
 ```
 
-That's it — all skills and workflows read the `backend` key and use the matching section automatically. No other changes needed.
+`none` means the host runs its internal persona reviewers and the orchestrator decides from
+those alone. `backend:` remains the fallback for a host not listed, and still selects the
+implementer backend for handoff calls:
+
+```yaml
+backend: claude   # or: codex
+```
 
 You can also override per-project by creating `.devflow.yaml` in the project root with just:
 ```yaml
