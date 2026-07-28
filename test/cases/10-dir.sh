@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# `dir`: emits the deterministic RUN_DIR for this project, created 0700 / owned by us /
-# never a symlink. `dir --fresh` wipes it (a new run must not inherit a prior feature's
-# phase session files), and re-emits a clean RUN_DIR.
+# `dir`: emits the deterministic RUN_DIR for this project, created 0700. `dir --fresh` wipes it
+# (a new run must not inherit a prior feature's phase session files), and re-emits a clean
+# RUN_DIR. Devflow asserts neither ownership nor non-symlink-ness — a hostile local uid is out
+# of scope for a personal tool — so the checks below are hygiene, not an enforced guarantee.
 set -u
 . "$LIB/assert.sh"; . "$LIB/sandbox.sh"
 
@@ -11,7 +12,7 @@ run_dir_here
 has "$(cd "$REPO_FX" && bash "$RUNNER" dir)" "RUN_DIR=$RUN_DIR" "dir emits the project's RUN_DIR"
 ok "[ -d '$RUN_DIR' ]" "RUN_DIR exists after dir"
 
-# security: RUN_DIR is created 0700, owned by us, not a symlink.
+# hygiene: RUN_DIR is created 0700 and, on a normal machine, as a real directory.
 perm="$(stat -c %a "$RUN_DIR" 2>/dev/null || stat -f %Lp "$RUN_DIR" 2>/dev/null)"
 is "${perm: -3}" "700" "RUN_DIR created with mode 700"
 ok "[ ! -L '$RUN_DIR' ]" "RUN_DIR is a real directory, not a symlink"

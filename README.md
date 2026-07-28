@@ -96,11 +96,14 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 - **Symlinks**: Codex (`~/.agents/skills/devflow`) points back to the repo
 - **Direct reads**: Cursor and Gemini read from the repo directory; Claude Code uses a plugin-cache copy (re-run `install.sh` after `git pull`)
 - **Session files**: stored under `RUN_DIR`, a deterministic path derived from a hash of
-  the repo root under `${TMPDIR:-/tmp}` (namespaced per project, never inside the repo) —
+  the repo root under `${DEVFLOW_RUN_HOME:-$HOME/.devflow/run}` (namespaced per project, never
+  inside the repo, and never under a write-mode call's default writable roots) —
   `bash scripts/devflow-runner.sh dir` always resolves back to the same directory
   for a given checkout; run it to recover the path rather than guessing. Abandoned run dirs
-  are auto-reclaimed after `DEVFLOW_RUN_TTL_DAYS` (default 7) days of inactivity — a live run
-  or a steadily-reused checkout is never touched
+  are auto-reclaimed after `DEVFLOW_RUN_TTL_DAYS` (default 7) days of inactivity. Only dirs
+  that are ours (uid match) and past the TTL are pruned, and the age is measured from last use,
+  so a steadily-reused checkout is never swept. Concurrency is a convention, not an enforced
+  guarantee: one devflow pipeline per checkout at a time, parallel work in git worktrees
 - **Per-project overrides**: `.devflow.yaml` in project root overrides global config
 
 ## Configuration
@@ -150,16 +153,15 @@ codex:
   implementer:
     model: "gpt-5.5"
     effort: "high"
-  fallback_command: "codex-local-proxy"   # rate-limit fallback; "" to disable
   session_reuse: true
 
 autonomy: attended         # attended | unattended
 output_dir: "docs/devflow/reports"
 ```
 
-> The only keys that change behavior are `backend`, `model`, `effort`, `command_path`, `fallback_command`, `session_reuse`, `autonomy`, `output_dir`, `review_personas`, and `integrations`. The CLI invocation (flags, read-only vs write posture, session capture) is built by the runner — see `skills/using-devflow/references/cross-tool-runner.md`.
+> The only keys that change behavior are `backend`, `model`, `effort`, `command_path`, `session_reuse`, `autonomy`, `output_dir`, `review_personas`, and `integrations`. The CLI invocation (flags, read-only vs write posture, session capture) is built by the runner — see `skills/using-devflow/references/cross-tool-runner.md`.
 
-**Environment overrides** (not config-file keys): `DEVFLOW_RUN_TTL_DAYS` (default `7`) sets how many idle days before an abandoned per-project run dir under `${TMPDIR:-/tmp}` is auto-reclaimed on the next `dir` call; set it to a non-number to disable the sweep entirely.
+**Environment overrides** (not config-file keys): `DEVFLOW_RUN_TTL_DAYS` (default `7`) sets how many idle days before an abandoned per-project run dir under `${DEVFLOW_RUN_HOME:-$HOME/.devflow/run}` is auto-reclaimed on the next `dir` call; set it to a non-number to disable the sweep entirely.
 
 ### Model Tiers
 
@@ -190,7 +192,7 @@ External reviews are launched in the background and polled via their event strea
 The codex binary is auto-resolved and validated (`exec --json` support; Homebrew
 preferred; NVM-shadowed CLIs skipped) — override with `codex.command_path`. The skill reads
 `.devflow.yaml` and passes `backend`/`model`/`effort` as explicit flags on each call; the
-runner resolves the trusted binary and `fallback_command` itself (never from a flag). The
+runner resolves the trusted binary itself (never from a flag). The
 canonical procedure lives in `skills/using-devflow/references/cross-tool-runner.md`.
 
 ## Skills

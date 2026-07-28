@@ -107,15 +107,17 @@ never inside the repo), so every phase — even in a fresh Bash call with no inh
 state — reconstructs the same `RUN_DIR` with a plain `bash "$RUNNER" dir` and shares its
 files: the plan path, the pre-implementation base, and each phase's review-session id.
 `dir --fresh` wipes any old run first so two same-day `devflow:run` features never collide
-on one plan file or resume each other's session; it refuses (non-zero, `refusing to wipe`)
-if another devflow run is still live in this checkout. (Phase 1's `devflow:plan` also starts
+on one plan file or resume each other's session. The wipe is UNCONDITIONAL — nothing checks
+whether another devflow call is still in flight in this checkout, and running it next to a live
+call deletes that call's session/verdict/freshness files silently. One pipeline per checkout at
+a time; parallel work goes in git worktrees. (Phase 1's `devflow:plan` also starts
 with `dir --fresh` — harmless here, since nothing is created in between.)
 
 Read the devflow config (merge three layers, each overriding the next: `.devflow.yaml` →
 `~/.devflow/config.yaml` → plugin `config.default.yaml`)
 once and note, for the whole run: `backend`, the `reviewer` and `implementer` `model`+`effort`,
 `session_reuse`, and `output_dir`. Each phase skill passes `backend`/`model`/`effort` to
-`run-external` as flags; `command_path`/`fallback_command` stay with the runner (never a flag).
+`run-external` as flags; `command_path` stays with the runner (never a flag).
 Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
 `$RUN_DIR/plan-path`; Phases 2–3 read it back from there.
 - **Orchestrator** (you): uses its own model (whatever the host agent runs).
@@ -164,7 +166,7 @@ Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
 - External cross-tool review
 - Combined report
 
-**This is the final quality gate.** The gate is *open `must_fix_now` findings after
+**This is the final quality gate.** The gate is *findings still blocking after
 synthesis* — not a reviewer's raw verdict token. On open blockers:
 - **attended**: Present to user for decision
 - **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review
@@ -194,23 +196,23 @@ Generate a comprehensive report summarizing the entire pipeline:
 ## Phase 1: Planning
 - **Status**: Complete / NEEDS_USER_DECISION
 - **Plan**: `<path>`
-- **Rounds**: N
-- **Blockers (`must_fix_now`)**: N (resolved) / N open
+- **Rounds**: N (your own recollection — no on-disk counter)
+- **Blocking**: N (resolved) / N open
 - **Not actioned**: N deferred + N out-of-scope — see the phase report's "Not actioned" table
 - **Duration**: ~Xm
 
 ## Phase 2: Implementation
 - **Status**: Complete / NEEDS_USER_DECISION
 - **Files changed**: N
-- **Rounds**: N
-- **Blockers (`must_fix_now`)**: N (resolved) / N open
+- **Rounds**: N (your own recollection — no on-disk counter)
+- **Blocking**: N (resolved) / N open
 - **Not actioned**: N deferred + N out-of-scope — see the phase report's "Not actioned" table
 - **Duration**: ~Xm
 
 ## Phase 3: Final Review
 - **Status**: Approved / Approved with notes / NEEDS_USER_DECISION
-- **Rounds**: N
-- **Blockers (`must_fix_now`)**: N (resolved) / N open
+- **Rounds**: N (your own recollection — no on-disk counter)
+- **Blocking**: N (resolved) / N open
 - **Not actioned**: N deferred + N out-of-scope — see the review report's
   "Not actioned" table for each finding, why it was not fixed, and the proposed next step
 - **Report**: `<path>`

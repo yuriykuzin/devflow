@@ -32,9 +32,9 @@ codex:
   # --json and needs TTY auth. Set an absolute path to force a specific binary; devflow
   # fails loudly if no candidate supports `exec --json`.
   command_path: ""
-  # Only model/effort/session_reuse (and the two exec-path keys command_path/fallback_command)
-  # are live knobs. The CLI invocation itself is built by the runner — see the canonical
-  # procedure in skills/using-devflow/references/cross-tool-runner.md.
+  # Only model/effort/session_reuse (and the exec-path key command_path) are live knobs.
+  # The CLI invocation itself is built by the runner — see the canonical procedure in
+  # skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
     model: "gpt-5.5"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
@@ -42,11 +42,6 @@ codex:
     model: "gpt-5.5"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   session_reuse: true
-  # Rate-limit fallback: when codex hits "limit reached", retry with this
-  # command instead. Typically codex-local-proxy (same CLI interface, routes
-  # through a local proxy with its own API key / rate limit pool).
-  # Comment out or set to "" to disable fallback (fail immediately).
-  fallback_command: "codex-local-proxy"
 
 # ──────────────────────────────────────────────────────────────
 # Shared settings (apply regardless of backend)
@@ -74,13 +69,13 @@ review_personas:
   enabled: true                       # false → single-reviewer fallback prompt
   # Which personas to spawn for internal multi-persona review.
   # External review always uses the single generalist prompt.
+  # Three by default: in practice these are the lenses that find defects rather than
+  # preferences. readability / performance / conservator are still supported — add them back
+  # here when a changeset actually calls for that lens.
   personas:
     - architect                       # Martin Fowler — design, patterns, SOLID
     - security                        # Ethical Hacker — OWASP, injection, auth
-    - readability                     # Junior Dev — clarity, confusion points, "why?"
-    - performance                     # Performance Hawk — N+1, allocations, complexity
     - qa                              # Devil's Advocate — edge cases, error paths, races
-    - conservator                     # Codebase Conservator — naming, imports, style consistency
 
   # ── Persona effort tiers ──────────────────────────────────
   # Not all personas need the heaviest model. Security and

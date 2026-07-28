@@ -8,13 +8,12 @@ mk_sandbox(){
   export HOME="$SB/home"; mkdir -p "$HOME/.devflow"
   export FAKE_CODEX_LOG="$SB/codex.log"; : > "$FAKE_CODEX_LOG"
 
-  # command_path/fallback_command are ONLY trusted from global config
-  # (~/.devflow/config.yaml) — never from a project-level .devflow.yaml. The fixture
-  # mirrors that trust boundary: the fake-codex path lives here, not in $REPO_FX.
+  # command_path is ONLY trusted from global config (~/.devflow/config.yaml) — never from a
+  # project-level .devflow.yaml. The fixture mirrors that trust boundary: the fake-codex path
+  # lives here, not in $REPO_FX.
   cat > "$HOME/.devflow/config.yaml" <<YAML
 codex:
   command_path: "$LIB/fake-codex"
-  fallback_command: ""
 YAML
 
   REPO_FX="$SB/proj"; mkdir -p "$REPO_FX"

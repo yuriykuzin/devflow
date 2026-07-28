@@ -63,7 +63,6 @@ printf '#!/bin/sh\necho "no json support here"\nexit 0\n' > "$SB/bad-codex"; chm
 cat > "$HOME/.devflow/config.yaml" <<YAML
 codex:
   command_path: "$SB/bad-codex"
-  fallback_command: ""
 YAML
 out="$( ( cd "$REPO_FX" && bash "$RUNNER" run-external --backend codex --model gpt-5.5 \
           --effort high --phase badbin --prompt-file "$PF" ) 2>&1 )"; rc=$?
@@ -79,7 +78,6 @@ ok "[ ! -e '$RUN_DIR/badbin-events.jsonl' ]" "...having launched no external too
 cat > "$HOME/.devflow/config.yaml" <<YAML
 codex:
   command_path: "$SB/does-not-exist-codex"
-  fallback_command: ""
 YAML
 out="$( ( cd "$REPO_FX" && bash "$RUNNER" run-external --backend codex --model gpt-5.5 \
           --effort high --phase gonebin --prompt-file "$PF" ) 2>&1 )"; rc=$?
@@ -92,7 +90,6 @@ printf '#!/bin/sh\nexit 0\n' > "$SB/noexec-codex"; chmod 444 "$SB/noexec-codex"
 cat > "$HOME/.devflow/config.yaml" <<YAML
 codex:
   command_path: "$SB/noexec-codex"
-  fallback_command: ""
 YAML
 out="$( ( cd "$REPO_FX" && bash "$RUNNER" run-external --backend codex --model gpt-5.5 \
           --effort high --phase noexecbin --prompt-file "$PF" ) 2>&1 )"; rc=$?

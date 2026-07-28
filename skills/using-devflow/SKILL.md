@@ -33,9 +33,8 @@ Devflow merges config from three layers, first setter wins:
 2. **Global**: `~/.devflow/config.yaml`
 3. **Defaults**: plugin `config.default.yaml`
 
-If nothing overrides, the shipped defaults apply. The exec-path keys `command_path` /
-`fallback_command` are honoured only from the global and default layers — never a project
-`.devflow.yaml`. See cross-tool-runner.md's "Config" section for the canonical merge.
+If nothing overrides, the shipped defaults apply. The exec-path key `command_path` is honoured
+only from the global and default layers — never a project `.devflow.yaml`. See cross-tool-runner.md's "Config" section for the canonical merge.
 
 ## Backend Switching
 
@@ -52,8 +51,8 @@ See `config.default.yaml` for the full template.
 
 Devflow calls external tools via their CLI in non-interactive mode. The one thing that
 genuinely can't live in markdown — supervising a long (8–10 min) backend CLI: detached
-launch, backoff polling with a hard cap, process-group kill on timeout, session capture,
-and the rate-limit/auth fallback — lives in a real script, `scripts/devflow-runner.sh`,
+launch, backoff polling with a hard cap, process-group kill on timeout, and session
+capture — lives in a real script, `scripts/devflow-runner.sh`,
 which every devflow skill calls as a subprocess. Config resolution (read `.devflow.yaml`,
 pass values as flags) and scope pinning (plain `git`) are done by the calling skill:
 

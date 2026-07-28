@@ -12,7 +12,7 @@ export RUNNER="$REPO/scripts/devflow-runner.sh"
 bash -n "$RUNNER" || { echo "bash -n failed on $(basename "$RUNNER")" >&2; exit 1; }
 echo "== bash -n: devflow-runner.sh OK =="
 
-chmod +x "$HERE/lib/fake-codex" "$HERE/lib/fake-codex-ok" "$HERE/lib/fake-claude" 2>/dev/null || true
+chmod +x "$HERE/lib/fake-codex" "$HERE/lib/fake-claude" 2>/dev/null || true
 
 export LIB="$HERE/lib"
 export DEVFLOW_TEST_REPO="$REPO"

@@ -25,7 +25,6 @@ export HOME="$WORK/home"; mkdir -p "$HOME/.devflow"
 cat > "$HOME/.devflow/config.yaml" <<YAML
 codex:
   command_path: "$REAL_CODEX"
-  fallback_command: ""
 YAML
 
 REPO_FX="$WORK/proj"; mkdir -p "$REPO_FX"

@@ -5,8 +5,8 @@ Referenced by `devflow:plan`, `devflow:implement`, `devflow:review`, and `devflo
 
 **What lives in the script vs. what you do yourself.** The one thing that genuinely cannot
 live in markdown is supervising a long (8–10 min) backend CLI: launch it detached, poll it
-with backoff and a hard cap, kill the whole process group on timeout, fold in the
-rate-limit/auth fallback, and capture the session id. A single Bash tool-call can't do that
+with backoff and a hard cap, kill the whole process group on timeout, and capture the session
+id. A single Bash tool-call can't do that
 (the host imposes its own short timeout, and Claude Code resets shell env + functions
 between calls). So that — and only that — is `scripts/devflow-runner.sh run-external`, plus
 a tiny `dir` helper for the run directory. **Config resolution and scope-pinning are your
@@ -76,11 +76,14 @@ ids work the same way — `run-external` writes `$RUN_DIR/<phase>.session` for y
 
 ### `dir [--fresh]`
 
-Prints `RUN_DIR=<path>` for this project (created 0700, owned by you, never a symlink).
-`--fresh` wipes the directory first, to start a clean run — clearing a prior feature's phase
-session files so they aren't silently resumed. `--fresh` refuses (non-zero, `refusing to
-wipe`) while another devflow run is still in flight in the same `RUN_DIR`, so it can never
-pull the rug out from under a live call.
+Prints `RUN_DIR=<path>` for this project (created mode 0700). `--fresh` wipes the directory
+first, to start a clean run — clearing a prior feature's phase session files so they aren't
+silently resumed. It does not check whether another devflow call is using the same `RUN_DIR`:
+run `--fresh` while a call is in flight and that call's session/output/freshness files are
+deleted under it, silently and with exit 0. Devflow used to hold a PID lease to refuse exactly
+this; the lease was removed as over-engineering for a single-user tool, so this is a convention,
+not an enforced guarantee — **one pipeline per checkout at a time; parallel work goes in git
+worktrees** (a worktree has its own repo root, hence its own `RUN_DIR`).
 
 ```bash
 bash "$RUNNER" dir            # RUN_DIR=<path>
@@ -94,11 +97,8 @@ stale-session error.
 Every `dir` call also opportunistically GCs *abandoned sibling* run dirs. This matters because
 `RUN_DIR` is keyed on the git top-level: a worktree-per-feature workflow mints a fresh hash
 every run, so `--fresh` reuse never reclaims them and they would otherwise pile up in
-`$HOME/.devflow/run` forever. A sibling is reclaimed only when it is all three of: **ours** (uid
-match — never another user's dir on a shared parent), **idle** (no live PID leased under
-`.pids/` — the same liveness test `dir --fresh` honours, so a running call is never reclaimed
-even if its dir looks old), and **old** (dir mtime more than `DEVFLOW_RUN_TTL_DAYS` full days
-ago; default 7, rounded down). The age is measured from last *use*, not creation — every
+`$HOME/.devflow/run` forever. A sibling is reclaimed only when it is both **ours** (uid match) and
+**old** (dir mtime more than `DEVFLOW_RUN_TTL_DAYS` full days ago; default 7, rounded down). The age is measured from last *use*, not creation — every
 `dir` / `run-external` call touches its own `RUN_DIR` — so a steadily-reused checkout is never
 pruned mid-project. The current `RUN_DIR` is always excluded. Set `DEVFLOW_RUN_TTL_DAYS` to a
 non-number to disable the sweep.
@@ -122,8 +122,7 @@ extracts the verdict text and session id, and prints a small `KEY=VALUE` report.
 | `--freshness` | no | snapshot the worktree before the call and record it as "what the reviewer read" — only if the call yields a usable verdict (see below) |
 | `--freshness-file <path>` | no | same, but the reviewed artefact is one file (plan review) rather than the worktree |
 
-The binary that actually runs (and the rate-limit `fallback_command`) is resolved by the
-script itself from the trusted config only — you never pass a binary path. `--model` /
+The binary that actually runs is resolved by the script itself from the trusted config only — you never pass a binary path. `--model` /
 `--effort` / `--backend` are not exec-path keys, so you supply them from config.
 
 ```bash
@@ -137,8 +136,7 @@ bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFF
 #   VERDICT_FILE=<path to the full verdict text>
 #   SESSION_ID=<id, or empty>
 #   SESSION_FILE=<path — read this to resume next iteration>
-#   TREE_FILE=<path to the recorded snapshot>   (only with --freshness/--freshness-file)
-#   ROUND=<how many reviewed rounds this phase has had>   (same)
+#   TREE_FILE=<path to the recorded snapshot digest>   (only with --freshness/--freshness-file)
 ```
 
 There is deliberately **no machine-parsed verdict status**. You are the orchestrator (an
@@ -148,13 +146,12 @@ same prose. `EXIT` is the only mechanical signal: `0` = the call completed and `
 holds the reviewer's answer; `124` = the call was killed at the hard cap (infra failure — no
 usable verdict), so retry or surface it, don't read it as a rejection.
 
-`run-external` folds in the rate-limit/auth fallback automatically: a transient rate limit
-retries once via `fallback_command` (new session id); an auth/capability failure (bad login,
-missing `--json`, empty event stream) escalates immediately without burning a retry. On any
-escalation outcome (the fallback retry also failed, or an auth/capability failure) it exits
-non-zero and prints a `devflow:` stderr line saying which branch fired; a **successful**
-fallback retry exits `0` with a usable verdict and a fresh session id. Read stderr, not just
-the exit code, before escalating to the user.
+A call that produces no usable verdict exits non-zero and prints a `devflow:` stderr line plus
+the last lines of the backend's own stderr. It does **not** classify the cause: guessing
+"rate-limited" or "auth failure" from substrings meant the reviewer's own words — text derived
+from the repo under review — could steer the diagnosis, and a python traceback was read as an
+auth failure. Read the reported stderr, not just the exit code, before escalating to the user.
+The one cause devflow does name positively is its own verdict extractor failing to run.
 
 **Session capture is automatic and mandatory** — `SESSION_FILE` is written on every call.
 Read it with `cat "$SESSION_FILE"` and pass its content as `--resume` next iteration; this
@@ -183,32 +180,28 @@ arrives as a single `--resume <id>` argument and the runner rejects it with
 these snippets through whatever shell their Bash tool uses (zsh on macOS), so the quoted,
 unconditional form is the only portable one.
 
-### `fence-delta --file <path>`
-
-Prints the delta brief as a nonce-fenced block on stdout — the block a re-review round appends
-*after* the prompt body. No brief (missing or empty file) prints nothing and exits 0, so callers
-splice `"$(bash "$RUNNER" fence-delta --file …)"` unconditionally; a non-empty file that cannot be
-read is exit 2, never a silent empty block (that would drop the still-open finding IDs).
-
-Two properties are the whole point. The fence carries a fresh 12-hex-digit nonce per call, because
-the brief quotes untrusted file content verbatim and a model honours a near-miss terminator — a
-static `--- END DELTA BRIEF ---` can be closed by the quoted content itself, after which the rest
-reads as orchestrator voice. And any `END DELTA BRIEF` variant inside the brief is **neutralized
-in place**, never dropped: the brief is the only record of still-open finding IDs, so deleting a
-line silently retires a finding, which then returns under a new ID and reads as progress. This
-lived inline in three SKILL.md files and the copies drifted; the skills now call the subcommand.
-
 ### `freshness-check --phase <p> [--file <path>]`
 
 The other half of `--freshness`. Answers one question: **is the code I am about to approve the
 same code the external reviewer actually read?** Without it an orchestrator can review a tree,
 "fix" a finding, and approve the result — a verdict on code nobody reviewed.
 
-The snapshot is content, not status: `HEAD` + `git status --porcelain` + `git diff HEAD` + the
-contents of every untracked file. A status-only snapshot would miss the most common case — a
-second edit to an already-modified file leaves `git status` byte-identical.
+The snapshot is content, not status: the `HEAD` oid (or `@unborn HEAD`) + `git status
+--porcelain -uall` + the full diff against that base + the contents of every untracked file,
+each entry framed by a header carrying its byte count. A status-only snapshot would miss the
+most common case — a second edit to an already-modified file leaves `git status` byte-identical.
+The byte counts are not decoration: without them the entry separator was text a file could
+contain, so one file could impersonate two and a regular file could impersonate a symlink,
+letting two different worktrees produce one digest. Untracked names are read `-z` (raw), because
+git C-quotes control characters regardless of `core.quotePath` and a quoted name silently
+dropped that file's content. Any git command that fails aborts the snapshot — a short snapshot
+still hashes cleanly, which is the fail-open this gate exists to prevent.
 
-`--freshness` writes the snapshot to `$RUN_DIR/<phase>.tree.pending` **before** the call and
+What lands on disk is not that content but a **16-hex digest** of it (`shasum -a 256`, or
+`sha256sum`; one of the two is a hard requirement — devflow refuses to gate a review on a
+forgeable checksum). The content is only a means of detecting an edit, so nothing reads it back.
+
+`--freshness` writes that digest to `$RUN_DIR/<phase>.tree.pending` **before** the call and
 promotes it to `<phase>.tree` only when the call produced a usable verdict; a failed, killed or
 verdict-less call deletes the pending file instead. So no `.tree` ever means "nothing was
 reviewed", never "reviewed and unchanged". Pass `--file` here whenever the call used
@@ -229,6 +222,7 @@ bash "$RUNNER" freshness-check --phase final-review
 |------|--------|---------|
 | 0 | `FRESH=yes` | still the reviewed tree — nothing drifted since the verdict |
 | 1 | `FRESH=no` `REASON=tree-changed` | something changed since the review — re-review before approving |
+| 1 | `FRESH=no` `REASON=snapshot-failed` | the review target could not be read at all (no git repo, an unreadable file, no `shasum`/`sha256sum`) — a permissions/environment problem, NOT an edit; fix that, then re-check. Never APPROVED |
 | 2 | `FRESH=no` `REASON=no-tree` | no call ever completed for this phase → not reviewed, so never APPROVED; report `NEEDS_USER_DECISION` |
 
 Both flags are opt-in so plain calls stay cheap, but any skill whose output is an APPROVED /
@@ -257,8 +251,8 @@ on a project with no `.devflow.yaml`. From the merged result:
 - `output_dir` (default `docs/devflow/reports`) → where plans/reports are saved; if it's
   under `docs/superpowers` (untracked-unsafe), fall back to writing plans under `$RUN_DIR`
 
-`command_path` / `fallback_command` are the exception — you never read or pass those; the
-script resolves them itself from the trusted files (see Security).
+`command_path` is the exception — you never read or pass it; the script resolves it itself from
+the trusted files (see Security).
 
 ## Scope: pin the review to one changeset (plain git)
 
@@ -320,8 +314,8 @@ not in the original changeset.
 
 `RUN_DIR` lives under `$HOME/.devflow/run`, not inside the repo — a hostile clone must never be
 able to *deliver* a tracked file into a path the script later reads. `RUN_DIR` and its parent are
-created mode 0700 with an ownership + symlink check before anything touches it, closing the
-predictable-path pre-planting attack.
+created mode 0700. That is hygiene on a single-user machine, not a defence against another uid on
+the box; devflow does not assert ownership or reject symlinked paths.
 
 It is **not** under `${TMPDIR:-/tmp}`, and that is a gate property, not tidiness. `RUN_DIR` holds
 `<phase>.tree` and `<phase>-verdict.txt`, the two artifacts `freshness-check` trusts, while a
@@ -335,8 +329,8 @@ reviewer-only guard would be decorative. The role-derived write posture is the *
 the artifact location is the one that does not depend on the backend honouring a flag; the codex
 implementer branch also passes both `exclude_*` overrides as belt.
 
-`codex.command_path` and `codex.fallback_command` — the two config keys that name an
-executable to run — are resolved **only** from the plugin default and
+`codex.command_path` — the one config key that names an executable to run — is resolved
+**only** from the plugin default and
 `~/.devflow/config.yaml`, never from a project-level `.devflow.yaml`, and only inside the
 script (never via a flag you pass). A committed project config choosing `backend` / models /
 `session_reuse` is fine; a committed project config choosing *which binary gets executed* is
@@ -361,10 +355,10 @@ argv (devflow miscalling its own helper: a caller bug, not a reviewer producing 
 `run-external` reports the two classes differently (`WARN — the verdict extractor could not run
 (rc=N)` vs. a reviewer that produced nothing). Both still fail closed; only one of them is a
 reason to retry the call rather than to go read the reviewer's verdict. That WARN is also the
-*first* thing `devflow_after_call` checks — it is the only positively known cause there, ahead of
-the rate-limit/auth substring guesses — and the extractor's own stderr goes to
-`<phase>-extractor-stderr.txt`, not the backend's `<phase>-stderr.txt`, so a python traceback can
-never be grepped as the backend's words.
+*first* thing `devflow_after_call` reports — it is the only positively known cause it has; every
+other failure just gets the backend's stderr tail. The extractor's own stderr goes to
+`<phase>-extractor-stderr.txt`, not the backend's `<phase>-stderr.txt`, so a python traceback is
+never echoed back to you as the backend's words.
 
 ## Async execution — how to launch `run-external`
 

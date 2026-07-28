@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Deterministic claude-CLI stub for the devflow test harness. No network, no token, no TTY.
-# Behaviour selected by FAKE_CLAUDE_MODE: ok (default) | ratelimit | auth | hang
+# Behaviour selected by FAKE_CLAUDE_MODE: ok (default) | auth | hang
 #   ok        -> print {"result":"...","session_id":"..."} to stdout, exit 0
 #   hang      -> stay alive, print nothing, never exit (-> exercises the hard-cap kill/124).
 #                Unlike fake-codex there is no separate "linger" mode: claude has no
 #                turn.completed-style mid-stream signal, so devflow_run_external's poll
 #                loop has only one way to detect a claude call is done — the process
 #                exiting — and only one way to detect it's stuck — the hard cap.
-#   ratelimit -> "rate limit reached" to stderr, exit 1, no stdout
 #   auth      -> "not logged in" to stderr, exit 1, no stdout
 # Records each real invocation to $FAKE_CLAUDE_LOG (if set) as
 # "MODE|resume=0/1|permission-mode=<m>|no-session-persistence=0/1".
@@ -40,7 +39,6 @@ emit_ok() {
 case "$MODE" in
   ok)        emit_ok ;;
   hang)      sleep 30 ;;
-  ratelimit) echo "Error: rate limit reached, please retry later." >&2; exit 1 ;;
   auth)      echo "Error: not logged in. Please run: claude login" >&2; exit 1 ;;
   *)         echo "fake-claude: unknown FAKE_CLAUDE_MODE=$MODE" >&2; exit 2 ;;
 esac
