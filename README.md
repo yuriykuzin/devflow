@@ -1,6 +1,8 @@
 # Devflow — Cross-Tool AI Workflow Orchestrator
 
-Automates the planning → implementation → review pipeline across multiple AI coding tools (Claude Code, Codex CLI, Windsurf, Gemini CLI, Cursor).
+[![test](https://github.com/yuriykuzin/devflow/actions/workflows/test.yml/badge.svg)](https://github.com/yuriykuzin/devflow/actions/workflows/test.yml)
+
+Automates the planning → implementation → review pipeline across multiple AI coding tools (Claude Code, Codex CLI, opencode, Gemini CLI, Cursor).
 
 ## How It Works
 
@@ -10,10 +12,10 @@ Devflow adds a **cross-tool orchestration layer** on top of [Superpowers](https:
 You (in Claude Code):  "devflow:run — add caching for /skills endpoint"
   │
   ├─ Phase 1: PLAN (current tool + superpowers:brainstorming + superpowers:writing-plans)
-  │    └─ External review: codex exec --full-auto "Review this plan..." → iterate until OK
+  │    └─ External review (read-only): "Review this plan..." → iterate until OK
   │
   ├─ Phase 2: IMPLEMENT (external tool or current tool + superpowers:subagent-driven-development)
-  │    └─ External review: codex exec --full-auto "Review this code..." → iterate until OK
+  │    └─ External review (read-only): "Review this code..." → iterate until OK
   │
   └─ Phase 3: REVIEW (cross-tool verification)
        └─ Both current tool and external tool review final result
@@ -54,15 +56,15 @@ ln -s /path/to/devflow/skills ~/.agents/skills/devflow
 claude --plugin-dir /path/to/devflow
 ```
 
-**Cursor** — reads plugin manifest from the repo directly (no setup needed).
-
-**Windsurf** — symlink workflow files:
+**opencode** — one symlink **per skill**, because opencode discovers
+`~/.config/opencode/skills/<name>/SKILL.md` and a single link to the whole `skills/` tree
+would bury every skill one level too deep:
 ```bash
-mkdir -p ~/.codeium/windsurf/windsurf/workflows
-for f in /path/to/devflow/windsurf/devflow-*.md; do
-  ln -sf "$f" ~/.codeium/windsurf/windsurf/workflows/
-done
+mkdir -p ~/.config/opencode/skills
+for d in /path/to/devflow/skills/*/; do ln -s "${d%/}" ~/.config/opencode/skills/"$(basename "$d")"; done
 ```
+
+**Cursor** — reads plugin manifest from the repo directly (no setup needed).
 
 **Gemini CLI** — reads `GEMINI.md` and `gemini-extension.json` from the repo directly.
 
@@ -78,7 +80,7 @@ cp /path/to/devflow/config.default.yaml ~/.devflow/config.yaml
 cd /path/to/devflow && git pull
 ```
 
-Codex, Windsurf, Cursor, and Gemini use symlinks or direct reads — changes propagate instantly.
+Codex, opencode, Cursor, and Gemini use symlinks or direct reads — changes propagate instantly.
 Claude Code uses a cached copy — re-run `install.sh` after pulling to update the cache.
 
 ## Uninstalling
@@ -90,7 +92,6 @@ Claude Code uses a cached copy — re-run `install.sh` after pulling to update t
 Or manually:
 ```bash
 rm ~/.agents/skills/devflow                                          # Codex
-rm ~/.codeium/windsurf/windsurf/workflows/devflow-*.md 2>/dev/null   # Windsurf
 rm -rf ~/.devflow                                                     # Config (optional)
 ```
 
@@ -100,9 +101,17 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 
 - **Single source of truth**: the git repo — clone it anywhere, symlinks point back
 - **Shared config**: `~/.devflow/config.yaml` is read by all agents
-- **Symlinks everywhere**: Codex (`~/.agents/skills/devflow`) and Windsurf (`workflows/devflow-*.md`) both point back to the repo
-- **Direct reads**: Claude Code, Cursor, and Gemini read from the repo directory
-- **Session files**: stored in `/tmp/devflow-*.session` — any agent can resume another's Codex session
+- **Symlinks**: Codex (`~/.agents/skills/devflow`) points back to the repo
+- **Direct reads**: Cursor and Gemini read from the repo directory; Claude Code uses a plugin-cache copy (re-run `install.sh` after `git pull`)
+- **Session files**: stored under `RUN_DIR`, a deterministic path derived from a hash of
+  the repo root under `${DEVFLOW_RUN_HOME:-$HOME/.devflow/run}` (namespaced per project, never
+  inside the repo, and never under a write-mode call's default writable roots) —
+  `bash scripts/devflow-runner.sh dir` always resolves back to the same directory
+  for a given checkout; run it to recover the path rather than guessing. Abandoned run dirs
+  are auto-reclaimed after `DEVFLOW_RUN_TTL_DAYS` (default 7) days of inactivity. Only dirs
+  that are ours (uid match) and past the TTL are pruned, and the age is measured from last use,
+  so a steadily-reused checkout is never swept. Concurrency is a convention, not an enforced
+  guarantee: one devflow pipeline per checkout at a time, parallel work in git worktrees
 - **Per-project overrides**: `.devflow.yaml` in project root overrides global config
 
 ## Configuration
@@ -110,19 +119,24 @@ Devflow works seamlessly across multiple agentic apps on the same machine:
 Global config: `~/.devflow/config.yaml`
 Project override: `.devflow.yaml` in project root
 
-### Switching Providers
+### Which tool reviews
 
-To switch between Claude Code and Codex as the external reviewer/implementer, change **one line** in `~/.devflow/config.yaml`:
+The point of an external review is a **different** tool's eyes, so the reviewing backend is
+picked by which tool is hosting the run — not by one global switch:
 
 ```yaml
-# Use Claude Code (opus for reviews, sonnet for implementation)
-backend: claude
-
-# Use Codex CLI (gpt-5.4 for both)
-backend: codex
+external_review:
+  from_claude: codex     # hosted by Claude Code → external review via codex
+  from_codex: none       # hosted by Codex → internal personas only
 ```
 
-That's it — all skills and workflows read the `backend` key and use the matching section automatically. No other changes needed.
+`none` means the host runs its internal persona reviewers and the orchestrator decides from
+those alone. `backend:` remains the fallback for a host not listed, and still selects the
+implementer backend for handoff calls:
+
+```yaml
+backend: claude   # or: codex
+```
 
 You can also override per-project by creating `.devflow.yaml` in the project root with just:
 ```yaml
@@ -136,27 +150,21 @@ backend: claude           # codex | claude — change this one line to switch
 
 claude:
   reviewer:
-    command: "claude"
-    flags: "-p --output-format json --permission-mode plan"
     model: "opus"          # alias for claude-opus-4-6
     effort: "max"          # --effort max (thorough reviews)
   implementer:
-    command: "claude"
-    flags: "-p --output-format json --permission-mode default"
     model: "sonnet"        # alias for claude-sonnet-4-6
     effort: "high"         # --effort high (fast implementation)
   session_reuse: true
 
 codex:
+  command_path: ""         # "" = auto-resolve & validate (exec --json), prefer Homebrew,
+                           # skip NVM-shadowed old CLI; set absolute path to force
   reviewer:
-    command: "codex exec"
-    flags: "--full-auto"
-    model: "gpt-5.4"
-    effort: "xhigh"        # via -c 'model_reasoning_effort="..."'
+    model: "gpt-5.5"
+    effort: "high"         # via -c 'model_reasoning_effort="..."'
   implementer:
-    command: "codex exec"
-    flags: "--full-auto"
-    model: "gpt-5.4"
+    model: "gpt-5.5"
     effort: "high"
   session_reuse: true
 
@@ -164,12 +172,16 @@ autonomy: attended         # attended | unattended
 output_dir: "docs/devflow/reports"
 ```
 
+> The only keys that change behavior are `backend`, `model`, `effort`, `command_path`, `session_reuse`, `autonomy`, `output_dir`, `review_personas`, and `integrations`. The CLI invocation (flags, read-only vs write posture, session capture) is built by the runner — see `skills/using-devflow/references/cross-tool-runner.md`.
+
+**Environment overrides** (not config-file keys): `DEVFLOW_RUN_TTL_DAYS` (default `7`) sets how many idle days before an abandoned per-project run dir under `${DEVFLOW_RUN_HOME:-$HOME/.devflow/run}` is auto-reclaimed on the next `dir` call; set it to a non-number to disable the sweep entirely.
+
 ### Model Tiers
 
 | Role | claude backend | codex backend | Purpose |
 |------|---------------|---------------|----------|
-| Reviewer | opus / max | gpt-5.4 / xhigh | Thorough plan and code reviews |
-| Implementer | sonnet / high | gpt-5.4 / high | Fast, capable code generation |
+| Reviewer | opus / max | gpt-5.5 / high | Thorough plan and code reviews |
+| Implementer | sonnet / high | gpt-5.5 / high | Fast, capable code generation |
 | Orchestrator | (host model) | (host model) | The agent running devflow (e.g., opus-4.6) |
 
 ### Session Reuse
@@ -179,9 +191,22 @@ When `<backend>.session_reuse: true`, devflow captures the session ID on the fir
 - Preserves review context across iterations
 - Enables session handoff between phases (plan review → implementation review)
 
-Session capture differs by backend:
-- **claude**: `jq -r '.session_id'` from `--output-format json`, resume with `--resume <id>`
-- **codex**: `thread_id` from `--json` JSONL, resume with `codex exec resume <id>`
+Session capture is done by the runner via `scripts/devflow-json.py` (a stdlib-only,
+fail-closed JSON extractor — no `jq` dependency), and differs by backend:
+- **claude**: `session_id` from the `--output-format json` object, resume with `--resume <id>`
+- **codex**: `thread_id` from the `--json` JSONL, resume with `exec resume <id>` using the
+  same full flag shape as a fresh call (`-c model_reasoning_effort` before `exec`,
+  `--json`, `-m`)
+
+### External Calls Are Non-Blocking
+
+External reviews are launched in the background and polled via their event stream
+(adaptive backoff, ~8–10 min hard-cap), so they never die at a host's command timeout.
+The codex binary is auto-resolved and validated (`exec --json` support; Homebrew
+preferred; NVM-shadowed CLIs skipped) — override with `codex.command_path`. The skill reads
+`.devflow.yaml` and passes `backend`/`model`/`effort` as explicit flags on each call; the
+runner resolves the trusted binary itself (never from a flag). The
+canonical procedure lives in `skills/using-devflow/references/cross-tool-runner.md`.
 
 ## Skills
 
@@ -191,15 +216,6 @@ Session capture differs by backend:
 | `devflow:implement` | Implementation with cross-tool review | "Implement this plan" |
 | `devflow:review` | Cross-tool review of existing code | "Review my changes" |
 | `devflow:run` | Full pipeline (plan → implement → review) | "Build this feature end-to-end" |
-
-## Windsurf Workflows
-
-| Workflow | Equivalent skill |
-|----------|-----------------|
-| `/devflow-plan` | `devflow:plan` |
-| `/devflow-implement` | `devflow:implement` |
-| `/devflow-review` | `devflow:review` |
-| `/devflow-run` | `devflow:run` |
 
 ## Relationship with Superpowers
 
@@ -236,16 +252,20 @@ devflow/
 ├── .codex/INSTALL.md               # Agent-readable install instructions
 ├── skills/                         # Skill definitions (shared by all agents)
 │   ├── using-devflow/SKILL.md      # Entry point — skill discovery
-│   ├── using-devflow/references/   # Platform-specific tool mappings
+│   ├── using-devflow/references/   # Platform tool mappings + cross-tool-runner.md (canonical external-call procedure)
 │   ├── devflow-plan/SKILL.md       # Plan with cross-tool review
 │   ├── devflow-implement/SKILL.md  # Implement with cross-tool review
 │   ├── devflow-review/SKILL.md     # Standalone cross-tool review
+│   ├── devflow-review/references/  # review-personas.md (persona lenses + tiers)
 │   └── devflow-run/SKILL.md        # Full pipeline orchestrator
-└── windsurf/                       # Windsurf workflow adapters
-    ├── devflow-plan.md
-    ├── devflow-implement.md
-    ├── devflow-review.md
-    └── devflow-run.md
+├── scripts/                        # The one load-bearing sh + its helpers
+│   ├── devflow-runner.sh           # Supervises the long backend CLI: dir + run-external
+│   └── devflow-json.py             # stdlib-only JSON extractor (verdict/session), fail-closed
+└── test/                           # Offline, deterministic harness (see test/README.md)
+    ├── run.sh                      # Test runner
+    ├── smoke-real-codex.sh         # opt-in real-CLI smoke test (needs token, not in CI)
+    ├── cases/                      # One file per case (10-dir, 30-invoke, …)
+    └── lib/                        # Fakes (fake-codex, fake-claude) + assert/sandbox helpers
 ```
 
 After installation:
@@ -253,9 +273,19 @@ After installation:
 /path/to/devflow/                              # Git repo = single source of truth
 ~/.devflow/config.yaml                         # Global configuration
 ~/.agents/skills/devflow                       # Codex: symlink → skills/
-~/.codeium/.../devflow-*.md                    # Windsurf: symlinks → windsurf/
 ~/.claude/plugins/cache/devflow-local/...       # Claude Code: plugin cache
 ```
+
+## Development
+
+Run the offline test harness — no API token, no network. It drives the real `scripts/devflow-runner.sh` against fake codex/claude stubs in throwaway sandboxes:
+
+```bash
+bash test/run.sh            # all cases
+bash test/run.sh 30 60      # only cases matching these prefixes
+```
+
+CI runs the same suite on Linux and macOS on every push and PR. See [`test/README.md`](test/README.md) for how the harness stays honest and the seams it exposes.
 
 ## License
 

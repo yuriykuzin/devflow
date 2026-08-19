@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Deterministic codex-CLI stub for the devflow test harness. No network, no token, no TTY.
+# Behaviour selected by FAKE_CODEX_MODE: ok (default) | auth | linger | hang
+#   ok        -> emit thread_id + agent_message(APPROVED) + turn.completed, exit 0
+#   linger    -> like ok, then sleep (stays alive after completion -> exercises drain->kill)
+#   hang      -> stay alive, emit NO events, never complete (-> exercises the hard-cap kill/124)
+#   auth      -> "not logged in" to stderr, exit 1, no events (empty events file)
+# Records each real invocation to $FAKE_CODEX_LOG (if set) as "MODE|resume=0/1".
+set -u
+joined=" $* "
+
+# Capability probe: `exec --help` must advertise --json (runner validates the binary this way).
+case "$joined" in
+  *" --help "*)
+    echo "Usage: codex exec [--json] [--full-auto] [--ephemeral] -m MODEL -o OUT PROMPT"
+    echo "      --json    emit JSONL events to stdout"
+    exit 0 ;;
+esac
+
+# Locate -o OUT (codex writes its last message there; for codex the runner reads events, not OUT).
+OUT=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && OUT="$a"
+  prev="$a"
+done
+
+is_resume=0
+case "$joined" in *" exec resume "*) is_resume=1 ;; esac
+
+# Record which write-posture the runner asked for, so tests can assert reviewers stay
+# read-only and only implementers get workspace-write.
+ro=0; case "$joined" in *'sandbox_mode="read-only"'*) ro=1 ;; esac
+fa=0; case "$joined" in *" --full-auto "*) fa=1 ;; esac
+
+MODE="${FAKE_CODEX_MODE:-ok}"
+[ -n "${FAKE_CODEX_LOG:-}" ] && printf '%s|resume=%s|ro=%s|fa=%s\n' "$MODE" "$is_resume" "$ro" "$fa" >> "$FAKE_CODEX_LOG"
+
+emit_ok() {
+  local text="${FAKE_CODEX_VERDICT:-Reviewed the change. No blocking issues found. APPROVED}"
+  echo '{"type":"thread.started","thread_id":"thread_test_abc123"}'
+  printf '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' \
+    "$(printf '%s' "$text" | sed 's/"/\\"/g')"
+  echo '{"type":"turn.completed"}'
+  [ -n "$OUT" ] && printf '%s\n' "$text" > "$OUT"
+}
+
+case "$MODE" in
+  ok)        emit_ok ;;
+  linger)    emit_ok; sleep 30 ;;
+  hang)      sleep 30 ;;
+  auth)      echo "Error: not logged in. Please run: codex login" >&2; exit 1 ;;
+  *)         echo "fake-codex: unknown FAKE_CODEX_MODE=$MODE" >&2; exit 2 ;;
+esac

@@ -27,11 +27,11 @@ Full development pipeline that orchestrates planning, implementation, and review
 ```dot
 digraph run {
     rankdir=TB;
-    
+
     "Parse user request" [shape=box];
     "Read devflow config" [shape=box];
     "Determine scope" [shape=diamond];
-    
+
     subgraph cluster_phase1 {
         label="Phase 1: PLAN";
         style=filled;
@@ -39,7 +39,7 @@ digraph run {
         "Invoke devflow:plan skill" [shape=box];
         "Plan approved?" [shape=diamond];
     }
-    
+
     subgraph cluster_phase2 {
         label="Phase 2: IMPLEMENT";
         style=filled;
@@ -47,7 +47,7 @@ digraph run {
         "Invoke devflow:implement skill" [shape=box];
         "Implementation approved?" [shape=diamond];
     }
-    
+
     subgraph cluster_phase3 {
         label="Phase 3: FINAL REVIEW";
         style=filled;
@@ -55,10 +55,10 @@ digraph run {
         "Invoke devflow:review skill" [shape=box];
         "Review passed?" [shape=diamond];
     }
-    
+
     "Generate final report" [shape=box];
     "Done" [shape=doublecircle];
-    
+
     "Parse user request" -> "Read devflow config";
     "Read devflow config" -> "Determine scope";
     "Determine scope" -> "Invoke devflow:plan skill" [label="full or plan-only"];
@@ -93,18 +93,36 @@ digraph run {
    - "don't ask me" / "--unattended" → `unattended`
    - Default → `attended`
 
-**Read config:**
+**Set up the run once:**
+
 ```bash
-cat ~/.devflow/config.yaml 2>/dev/null || echo "Using defaults"
-cat .devflow.yaml 2>/dev/null || echo "No project override"
+# <inline the $RUNNER locator snippet — see cross-tool-runner.md "Locate the runner">
+# (env does not survive between Bash calls, so every step re-runs this guarded locator.)
+# Fresh feature -> claim a clean run so no prior feature's session/plan files get resumed.
+RUN_DIR="$(bash "$RUNNER" dir --fresh | sed -n 's/^RUN_DIR=//p')"
 ```
 
-**Resolve the active backend** from the `backend` key (default: `claude`), then read
-settings from the matching section (`claude.*` or `codex.*`):
-- **Reviewer**: `<backend>.reviewer.model` + `<backend>.reviewer.effort`
-- **Implementer**: `<backend>.implementer.model` + `<backend>.implementer.effort`
-- **Orchestrator** (you): uses its own model (e.g., `opus-4.6` in Windsurf, whatever the host agent runs)
-- **Session reuse**: `<backend>.session_reuse` (default: `true`)
+`RUN_DIR` is deterministic per project (a hash of the repo root under `$HOME/.devflow/run`,
+never inside the repo), so every phase — even in a fresh Bash call with no inherited shell
+state — reconstructs the same `RUN_DIR` with a plain `bash "$RUNNER" dir` and shares its
+files: the plan path, the pre-implementation base, and each phase's review-session id.
+`dir --fresh` wipes any old run first so two same-day `devflow:run` features never collide
+on one plan file or resume each other's session. The wipe is UNCONDITIONAL — nothing checks
+whether another devflow call is still in flight in this checkout, and running it next to a live
+call deletes that call's session/verdict/freshness files silently. One pipeline per checkout at
+a time; parallel work goes in git worktrees. (Phase 1's `devflow:plan` also starts
+with `dir --fresh` — harmless here, since nothing is created in between.)
+
+Read the devflow config (merge three layers, each overriding the next: `.devflow.yaml` →
+`~/.devflow/config.yaml` → plugin `config.default.yaml`)
+once and note, for the whole run: `backend`, the `reviewer` and `implementer` `model`+`effort`,
+`session_reuse`, and `output_dir`. Each phase skill passes `backend`/`model`/`effort` to
+`run-external` as flags; `command_path` stays with the runner (never a flag). The reviewing backend is resolved **by host** —
+`external_review.from_<host>` first, `backend:` only as the fallback, `none` = internal personas
+only; see "Which backend reviews" in `skills/using-devflow/SKILL.md`.
+Phase 1 (`devflow:plan`) computes the canonical plan path and records it at
+`$RUN_DIR/plan-path`; Phases 2–3 read it back from there.
+- **Orchestrator** (you): uses its own model (whatever the host agent runs).
 
 **Create a TodoWrite/todo_list with phases to track progress.**
 
@@ -115,12 +133,13 @@ settings from the matching section (`claude.*` or `codex.*`):
 - External cross-tool review of the plan
 - Iteration until plan is approved
 
-**Output**: Plan file path (e.g., `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`)
+**Output**: Plan file at the canonical path recorded in `$RUN_DIR/plan-path` (under `output_dir`, not `docs/superpowers/`).
 
-**Session artifact**: After plan review completes, a session file exists at `/tmp/devflow-plan-review.session`. This carries context to Phase 2.
+**Session artifact**: After plan review completes, the session file is at
+`$RUN_DIR/plan-review.session`. This carries context to Phase 2.
 
 **In attended mode**: After plan is finalized, present summary to user:
-> "Phase 1 complete. Plan saved to `<path>`. External review: APPROVED after N iterations. Proceed to implementation?"
+> "Phase 1 complete. Plan saved to `<path>`. External review: APPROVED after N rounds. Proceed to implementation?"
 
 **In unattended mode**: Proceed directly to Phase 2.
 
@@ -133,7 +152,7 @@ settings from the matching section (`claude.*` or `codex.*`):
 
 **Input**: Plan file from Phase 1 (or user-provided path)
 
-**Session continuity**: `devflow:implement` automatically checks for `/tmp/devflow-plan-review.session` and resumes that session for code review — the reviewer already knows the plan and prior feedback.
+**Session continuity**: `devflow:implement` resumes `$RUN_DIR/plan-review.session` (same `RUN_DIR`, re-derived from `bash "$RUNNER" dir` — no shell inheritance needed) for code review — the reviewer already knows the plan and prior feedback.
 
 **Output**: Code changes in working directory + review report
 
@@ -149,9 +168,18 @@ settings from the matching section (`claude.*` or `codex.*`):
 - External cross-tool review
 - Combined report
 
-**This is the final quality gate.** If critical issues are found:
+**This is the final review.** What matters is the findings you still consider worth fixing —
+not a reviewer's raw verdict token. On open findings:
 - **attended**: Present to user for decision
-- **unattended**: Attempt to fix and re-review (max 2 additional iterations)
+- **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review
+  loop (each round re-runs every persona plus the external reviewer, if one is configured, with
+  a delta brief). No round cap; it stops as `NEEDS_USER_DECISION` when a round's fixes produce
+  new findings instead, or a fix would break the pinned scope. Do not restate or override
+  those rules here.
+
+**`NEEDS_USER_DECISION` propagates up.** It is neither approval nor failure: end the run,
+report it as the pipeline status with the exact finding IDs and the decision needed, and do
+not start another phase or another round around it.
 
 ### Step 4: Final Report
 
@@ -166,21 +194,27 @@ Generate a comprehensive report summarizing the entire pipeline:
 **External reviewer**: <tool name>
 
 ## Phase 1: Planning
-- **Status**: ✅ Complete
+- **Status**: Complete / NEEDS_USER_DECISION
 - **Plan**: `<path>`
-- **Review iterations**: N
+- **Rounds**: N (your own recollection — no on-disk counter)
+- **Blocking**: N (resolved) / N open
+- **Not actioned**: N deferred + N out-of-scope — see the phase report's "Not actioned" table
 - **Duration**: ~Xm
 
-## Phase 2: Implementation  
-- **Status**: ✅ Complete
+## Phase 2: Implementation
+- **Status**: Complete / NEEDS_USER_DECISION
 - **Files changed**: N
-- **Review iterations**: N
+- **Rounds**: N (your own recollection — no on-disk counter)
+- **Blocking**: N (resolved) / N open
+- **Not actioned**: N deferred + N out-of-scope — see the phase report's "Not actioned" table
 - **Duration**: ~Xm
 
 ## Phase 3: Final Review
-- **Status**: ✅ Approved / ⚠️ Approved with notes
-- **Critical issues**: 0
-- **Important issues**: N (resolved)
+- **Status**: Approved / Approved with notes / NEEDS_USER_DECISION
+- **Rounds**: N (your own recollection — no on-disk counter)
+- **Blocking**: N (resolved) / N open
+- **Not actioned**: N deferred + N out-of-scope — see the review report's
+  "Not actioned" table for each finding, why it was not fixed, and the proposed next step
 - **Report**: `<path>`
 
 ## Summary
@@ -216,7 +250,7 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 |-------|--------|
 | External tool CLI not found | Tell user to install it, suggest config change |
 | External tool returns error | Retry once, then show error to user |
-| External tool timeout | Default 5 min timeout, retry once |
+| External tool timeout | ~8–10 min hard-cap (`run-external`'s internal poll loop) → kill, surface last event, escalate |
 | Plan file not found (Phase 2) | Ask user for path |
 | Config file invalid YAML | Use defaults, warn user |
 | Superpowers not installed | Tell user to install superpowers first |
@@ -229,5 +263,7 @@ Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 - **Don't auto-commit** — changes stay in working directory
 - **Report everything** — save reports for audit trail
 - **Superpowers skills do the heavy lifting** — devflow orchestrates between tools
-- **Model tiers matter** — `xhigh` for reviews (thorough), `high` for implementation (fast)
+- **Model tiers matter** — reviewer effort ≥ implementer (claude: `max` review / `high` impl; codex: `high` for both)
+- **RUN_DIR is deterministic per project** (a hash of the repo root under `$HOME/.devflow/run` — deliberately not `$TMPDIR`, a write-mode call's writable root; `DEVFLOW_RUN_HOME` overrides it, for the test harness); every phase reconstructs it with `bash "$RUNNER" dir` and shares its files (plan path, impl base, session ids) — no shell inheritance. Config is read from `.devflow.yaml` and passed to `run-external` as flags; the codex binary is resolved by the runner from trusted config only
+- **External calls are non-blocking** — `run-external` backgrounds its own child process and polls internally; no 2-min-timeout deaths. On Claude Code, launch the `run-external` call itself with the Bash tool's `run_in_background: true` rather than polling in a loop (see cross-tool-runner.md's async-execution guidance)
 - **Session reuse saves tokens** — ~20k tokens saved per resumed iteration

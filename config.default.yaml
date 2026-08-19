@@ -3,6 +3,18 @@
 # Per-project overrides: place .devflow.yaml in project root.
 
 # ──────────────────────────────────────────────────────────────
+# EXTERNAL REVIEW — resolved by HOST, not by one global switch
+# ──────────────────────────────────────────────────────────────
+# The value of an external review is a DIFFERENT tool's eyes, so which backend to call
+# depends on which tool is hosting the run. `none` means: run internal personas only and
+# close the review on their synthesis — there is no external verdict to wait for.
+external_review:
+  from_claude: codex           # hosted by Claude Code → external review via the codex CLI
+  from_codex: none             # hosted by Codex → internal personas only, no external call
+# `backend:` below stays the fallback for a host not listed here, and still selects the
+# implementer backend for handoff calls.
+
+# ──────────────────────────────────────────────────────────────
 # BACKEND SELECTOR — change this one line to switch everything
 # ──────────────────────────────────────────────────────────────
 backend: claude              # codex | claude
@@ -11,56 +23,37 @@ backend: claude              # codex | claude
 # Backend: claude (Claude Code CLI)
 # ──────────────────────────────────────────────────────────────
 claude:
+  # Only model/effort/session_reuse are live knobs. The CLI invocation itself (flags, headless
+  # mode, session capture, read-only vs write posture) is built by the runner — see the canonical
+  # procedure in skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
-    command: "claude"
-    flags: "-p --output-format json --permission-mode plan"
     model: "opus"                    # alias: opus → claude-opus-4-6
     effort: "max"                    # --effort max (thorough reviews)
   implementer:
-    command: "claude"
-    flags: "-p --output-format json --permission-mode default"
     model: "sonnet"                  # alias: sonnet → claude-sonnet-4-6
     effort: "high"                   # --effort high (fast implementation)
   session_reuse: true
-  # Protocol notes:
-  #   Headless mode:    -p (print mode, non-interactive)
-  #   Model:            --model <alias|full-name>
-  #   Effort:           --effort <low|medium|high|max>
-  #   JSON output:      --output-format json
-  #   Session capture:  jq -r '.session_id' from JSON output
-  #   Session resume:   claude -p --resume <session_id>
-  #   Read-only review: --permission-mode plan (no file writes)
-  #   Full access:      --permission-mode default
-  #   Tool restrict:    --allowedTools "Read Grep Glob"
 
 # ──────────────────────────────────────────────────────────────
 # Backend: codex (Codex CLI)
 # ──────────────────────────────────────────────────────────────
 codex:
+  # Absolute path to the Rust codex CLI. Empty = auto-resolve & validate: devflow picks
+  # the first candidate whose `exec --help` advertises `--json` (preferring Homebrew
+  # /opt/homebrew/bin/codex), detecting & skipping an NVM-shadowed old CLI that lacks
+  # --json and needs TTY auth. Set an absolute path to force a specific binary; devflow
+  # fails loudly if no candidate supports `exec --json`.
+  command_path: ""
+  # Only model/effort/session_reuse (and the exec-path key command_path) are live knobs.
+  # The CLI invocation itself is built by the runner — see the canonical procedure in
+  # skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
-    command: "codex exec"
-    flags: "--full-auto"
-    model: "gpt-5.4"
-    effort: "xhigh"                  # via -c 'model_reasoning_effort="..."'
+    model: "gpt-5.6-terra"           # the model devflow reviews WITH when the host is Claude
+    effort: "high"                   # via -c 'model_reasoning_effort="..."'
   implementer:
-    command: "codex exec"
-    flags: "--full-auto"
-    model: "gpt-5.4"
+    model: "gpt-5.5"
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   session_reuse: true
-  # Rate-limit fallback: when codex hits "limit reached", retry with this
-  # command instead. Typically codex-local-proxy (same CLI interface, routes
-  # through a local proxy with its own API key / rate limit pool).
-  # Comment out or set to "" to disable fallback (fail immediately).
-  fallback_command: "codex-local-proxy"
-  # Protocol notes:
-  #   Headless mode:    --full-auto
-  #   Model:            -m <model>
-  #   Effort:           -c 'model_reasoning_effort="<effort>"' (NOT --effort)
-  #   JSON output:      --json (JSONL events on stdout)
-  #   Session capture:  head -1 events.jsonl | jq -r '.thread_id'
-  #   Session resume:   codex exec resume <session_id>
-  #   Output file:      -o <path>
 
 # ──────────────────────────────────────────────────────────────
 # Shared settings (apply regardless of backend)
@@ -73,9 +66,6 @@ autonomy: attended
 
 # Where to save reports and artifacts
 output_dir: "docs/devflow/reports"
-
-# Maximum review iterations before escalating to user
-max_review_iterations: 7
 
 # ──────────────────────────────────────────────────────────────
 # Multi-persona review
@@ -91,13 +81,13 @@ review_personas:
   enabled: true                       # false → single-reviewer fallback prompt
   # Which personas to spawn for internal multi-persona review.
   # External review always uses the single generalist prompt.
+  # Three by default: in practice these are the lenses that find defects rather than
+  # preferences. readability / performance / conservator are still supported — add them back
+  # here when a changeset actually calls for that lens.
   personas:
     - architect                       # Martin Fowler — design, patterns, SOLID
     - security                        # Ethical Hacker — OWASP, injection, auth
-    - readability                     # Junior Dev — clarity, confusion points, "why?"
-    - performance                     # Performance Hawk — N+1, allocations, complexity
     - qa                              # Devil's Advocate — edge cases, error paths, races
-    - conservator                     # Codebase Conservator — naming, imports, style consistency
 
   # ── Persona effort tiers ──────────────────────────────────
   # Not all personas need the heaviest model. Security and
@@ -113,7 +103,7 @@ review_personas:
         model: "opus"
         effort: "max"
       codex:
-        effort: "xhigh"
+        effort: "high"
     standard:                         # thorough but less expensive
       personas: [qa, readability, performance, conservator]
       claude:
@@ -127,6 +117,6 @@ review_personas:
 integrations:
   codex: true
   claude-code: true
-  windsurf: true
+  opencode: true
   # cursor: true       # auto-detected from repo — no install step needed
   # gemini: true       # auto-detected from repo — no install step needed

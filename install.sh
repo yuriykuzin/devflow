@@ -97,20 +97,20 @@ do_choose() {
 integrations:
   codex: true
   claude-code: true
-  windsurf: true
+  opencode: true
   # cursor: true
   # gemini: true
 EOF
   fi
 
-  local tools=("codex" "claude-code" "windsurf")
-  local labels=("Codex CLI" "Claude Code" "Windsurf")
+  local tools=("codex" "claude-code" "opencode")
+  local labels=("Codex CLI" "Claude Code" "opencode")
   local detected=()
 
   # Detect available tools
   command -v codex >/dev/null 2>&1 && detected+=("codex") || true
   [ -d "$HOME/.claude" ] && detected+=("claude-code") || true
-  [ -d "$HOME/.codeium/windsurf" ] && detected+=("windsurf") || true
+  { command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; } && detected+=("opencode") || true
 
   echo "Available tools:"
   echo ""
@@ -175,6 +175,10 @@ EOF
 
 # ---------------------------------------------------------------------------
 # Deploy: copy source → ~/.codex/devflow/, then install from there
+#
+# scripts/devflow-runner.sh ships as a plain file under this tree — rsync -a below
+# copies it like any other file. It is always invoked as `bash "$RUNNER" ...`, never
+# executed directly, so no chmod +x step is needed here or anywhere else in this script.
 # ---------------------------------------------------------------------------
 
 do_deploy() {
@@ -197,7 +201,6 @@ do_deploy() {
 
   # Remove old installations so re-install points to INSTALL_DIR
   rm -f "$HOME/.agents/skills/devflow"
-  rm -f "$HOME/.codeium/windsurf/windsurf/workflows"/devflow-*.md 2>/dev/null || true
   rm -rf "$HOME/.claude/plugins/cache/$CLAUDE_MKT/devflow" 2>/dev/null || true
 
   DEVFLOW_HOME="$INSTALL_DIR"
@@ -264,26 +267,7 @@ do_install() {
     echo "  · skipped (disabled in config)"
   fi
 
-  # 2. Windsurf
-  echo "Windsurf:"
-  if integration_enabled "windsurf"; then
-    local windsurf_dir="$HOME/.codeium/windsurf/windsurf/workflows"
-    if [ -d "$HOME/.codeium/windsurf" ]; then
-      mkdir -p "$windsurf_dir"
-      for wf in "$DEVFLOW_HOME"/windsurf/devflow-*.md; do
-        [ -f "$wf" ] || continue
-        local name
-        name="$(basename "$wf")"
-        symlink_or_skip "$wf" "$windsurf_dir/$name" "$name"
-      done
-    else
-      echo "  · not detected — skipped"
-    fi
-  else
-    echo "  · skipped (disabled in config)"
-  fi
-
-  # 3. Claude Code — proper marketplace-based installation
+  # 2. Claude Code — proper marketplace-based installation
   #    Creates a local marketplace with marketplace.json, copies plugin
   #    to cache, and registers in installed_plugins.json + settings.json.
   echo "Claude Code:"
@@ -391,6 +375,27 @@ else:
     echo "  · skipped (disabled in config)"
   fi
 
+  # 3. opencode — a flat skills dir: one symlink PER SKILL, not one for the whole tree.
+  #    opencode discovers ~/.config/opencode/skills/<name>/SKILL.md, so a single
+  #    skills/ -> devflow/skills symlink would hide every skill one level too deep.
+  echo "opencode:"
+  if integration_enabled "opencode"; then
+    if command -v opencode >/dev/null 2>&1 || [ -d "$HOME/.config/opencode" ]; then
+      mkdir -p "$HOME/.config/opencode/skills"
+      for skill_dir in "$DEVFLOW_HOME"/skills/*/; do
+        [ -d "$skill_dir" ] || continue
+        local skill_name
+        skill_name="$(basename "$skill_dir")"
+        symlink_or_skip "${skill_dir%/}" "$HOME/.config/opencode/skills/$skill_name" \
+          "~/.config/opencode/skills/$skill_name"
+      done
+    else
+      echo "  · not detected — skipped"
+    fi
+  else
+    echo "  · skipped (disabled in config)"
+  fi
+
   # 4. Cursor
   echo "Cursor:"
   echo "  ✓ reads from $DEVFLOW_HOME directly (no setup needed)"
@@ -426,12 +431,20 @@ do_uninstall() {
     && echo "  ✓ removed Codex symlink" \
     || echo "  · Codex: not installed"
 
-  # Windsurf
-  local wf_found=0
-  for wf in "$HOME/.codeium/windsurf/windsurf/workflows"/devflow-*.md; do
-    [ -L "$wf" ] && rm "$wf" && echo "  ✓ removed $(basename "$wf")" && wf_found=1
-  done
-  [ "$wf_found" = "0" ] && echo "  · Windsurf: not installed"
+  # opencode — one symlink per skill; only remove links that point into devflow, so a
+  # same-named skill the user installed from elsewhere is left alone.
+  local oc_dir="$HOME/.config/opencode/skills" oc_removed=0
+  if [ -d "$oc_dir" ]; then
+    for link in "$oc_dir"/*; do
+      [ -L "$link" ] || continue
+      case "$(readlink "$link")" in
+        "$DEVFLOW_HOME"/skills/*|"$INSTALL_DIR"/skills/*|"$HOME"/.claude/plugins/cache/"$CLAUDE_MKT"/*)
+          rm "$link"; oc_removed=$((oc_removed+1)) ;;
+      esac
+    done
+  fi
+  [ "$oc_removed" -gt 0 ] && echo "  ✓ removed $oc_removed opencode skill symlink(s)" \
+    || echo "  · opencode: not installed"
 
   # Claude Code — remove marketplace, cache, and registrations
   local mkt_dir="$HOME/.claude/plugins/marketplaces/$CLAUDE_MKT"
@@ -497,18 +510,6 @@ do_status() {
     echo "  ✗ Codex:       not installed"
   fi
 
-  # Windsurf
-  local wf_dir="$HOME/.codeium/windsurf/windsurf/workflows"
-  if [ -d "$HOME/.codeium/windsurf" ]; then
-    local found=0
-    for wf in "$wf_dir"/devflow-*.md; do
-      [ -L "$wf" ] && found=$((found + 1))
-    done
-    echo "  ✓ Windsurf:    $found workflow(s) in $wf_dir"
-  else
-    echo "  · Windsurf:    not detected"
-  fi
-
   # Claude Code
   local plugin_dir="$HOME/.claude/plugins/cache/$CLAUDE_MKT/devflow/$DEVFLOW_VERSION"
   if [ -d "$plugin_dir" ]; then
@@ -527,6 +528,22 @@ assert '$plugin_key' in d.get('plugins', {})
     fi
   else
     echo "  ✗ Claude Code: not installed"
+  fi
+
+  # opencode
+  local oc_dir="$HOME/.config/opencode/skills" oc_n=0
+  if [ -d "$oc_dir" ]; then
+    for link in "$oc_dir"/*; do
+      [ -L "$link" ] || continue
+      case "$(readlink "$link")" in
+        */devflow/skills/*|*/devflow-local/devflow/*/skills/*) oc_n=$((oc_n+1)) ;;
+      esac
+    done
+  fi
+  if [ "$oc_n" -gt 0 ]; then
+    echo "  ✓ opencode:    $oc_n skill(s) linked in ~/.config/opencode/skills"
+  else
+    echo "  ✗ opencode:    not installed"
   fi
 
   # Cursor
