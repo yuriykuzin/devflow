@@ -82,6 +82,9 @@ Synthesize findings after both complete. Two axes of diversity: **personas × to
 2. Read `review_personas.personas` and `review_personas.persona_tiers` from config
 3. For each enabled persona, use the Agent tool to spawn a background sub-agent. Pass it:
    - The persona's review lens (from review-personas.md)
+   - The prose one-pass rule and its runtime-prose exception (review-personas.md, "Prose is a
+     one-pass concern, not a loop") — so no persona loops on companion prose, and none waves
+     through prose the code reads at runtime
    - The review target scope (what git command to run, or what files to read)
    - Model override matching the persona's tier (opus for deep, sonnet for standard)
    - For Claude: `deep` = opus/max, `standard` = sonnet/max
@@ -91,7 +94,10 @@ Synthesize findings after both complete. Two axes of diversity: **personas × to
 5. If `persona_tiers` is absent or malformed, treat all personas as `standard` tier.
    If a persona is not found in any tier, use `standard` tier values.
 6. If `review_personas.personas` is empty/missing/unrecognized, or `enabled: false`,
-   fall back to `superpowers:requesting-code-review` (single internal review)
+   fall back to `superpowers:requesting-code-review` (single internal review) — and prepend the
+   prose one-pass rule and its runtime-prose exception (review-personas.md, "Prose is a one-pass
+   concern, not a loop") to that reviewer's brief, so the fallback path does not reintroduce
+   adversarial prose looping the persona path avoids
 7. If exactly 1 persona enabled, spawn a single sub-agent (no synthesis needed)
 8. **On every re-review round, re-spawn ALL enabled personas — not just the ones that
    complained.** A fix can introduce defects anywhere, and the persona that catches them
@@ -165,6 +171,8 @@ REVIEW CHECKLIST:
 6. READABILITY — Naming, structure, comments where needed
 
 For each issue say whether it BLOCKS this changeset, plus a one-line reason. A finding blocks only if this changeset introduced or worsened it (or it violates an explicit stated requirement), the evidence is concrete rather than hypothetical, and a proportional fix fits inside the scope above. Everything else is non-blocking: report it with its reason. A suggestion that costs more than the changeset it reviews does not block, however alarming it sounds.
+
+Companion prose — a plan narrative, design notes or an ADR, PR/commit descriptions, intent-only docstrings — gets ONE accuracy pass, not a round: a wrong or over-reaching claim in it is non-blocking. Do not raise an unmeasured claim ('only', counts, line-number lists) about a library or the codebase unless you verified it this round; if you cannot verify it, omit it or report it as unverified — never as a blocker, and never as grounds for another round. The exception is prose the code depends on at runtime — a tool or function description a model reads, a public API contract, an invariant callers rely on — which blocks like code.
 
 Give each finding a stable ID and reuse it if you raise it again in a later round.
 Also give each issue file:line, description, and the smallest fix.
@@ -386,6 +394,16 @@ recomputed from `git diff` every round, so each fix widened what the next round 
 findings regenerated forever. `<phase>-scope.txt` is written once and reused; that is the
 structural fix, and it needs no bookkeeping to hold.
 
+**Prose is a one-pass concern, not a loop.** A plan narrative, design notes, PR/commit
+descriptions, and intent-only docstrings are checked once for factual accuracy and then fixed in a single
+final wording pass — a wrong or over-reaching claim in them is a non-blocking nit, never a round.
+The failure mode this prevents: reviewers spin round after round "correcting" one unmeasured
+assertion into a different unmeasured one while the code has been correct since round one. The
+loop is for code and observable behavior. The one exception is prose the code depends on at
+runtime — a tool/function description a model reads, a public API contract, an invariant callers
+rely on — which is code-adjacent, in scope, and blocks like code. See "Prose is a one-pass
+concern, not a loop" in `review-personas.md`.
+
 **Implementation handoff**: If fixes are complex, resume the review session with
 **implementer** settings:
 
@@ -408,6 +426,7 @@ codex via `--full-auto` — while a reviewer call runs read-only).
 - **Internal + external in parallel** — both are independent reads, synthesize after both complete
 - **Alarming ≠ blocking** — a finding blocks only if this changeset caused it, the evidence is concrete, and a proportional fix fits the scope
 - **Pin the scope once** — a fix must never widen what the next round reviews
+- **Prose is reviewed once, code is looped** — plan narratives / design notes / PR descriptions / intent-only docstrings get a single accuracy pass; a wrong claim in them is a non-blocking nit, never a round. Exception: prose the code reads at runtime (tool/function descriptions, API contracts, stated invariants) blocks like code
 - **Every fix round re-runs every persona**, with a delta brief saying what changed and where to look
 - **You decide, the reviewers advise** — read internal + external findings and choose per finding: fix now, or skip with a reason in the report
 - **Nothing is dropped silently** — every raw finding lands in the report with its blocking call, a reason, and a proposed next step

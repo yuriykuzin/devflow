@@ -55,6 +55,26 @@ Findings **on the fix code itself** are judged against the original goal, not ag
 a bug in the new code blocks; a design suggestion about the new code does not. Otherwise every
 fix round grows the scope that the next round reviews.
 
+## Prose is a one-pass concern, not a loop
+
+Companion prose — a plan narrative, design notes or ADRs, PR and commit descriptions, and
+docstrings that merely describe intent — is reviewed **once** for factual accuracy against measured behavior. It
+does **not** re-enter the fix → re-review loop. Personas review **code and observable behavior**;
+when a changeset is code plus a companion doc, the code is the loop's subject and the doc gets a
+single accuracy pass at the end.
+
+- A wrong or over-reaching claim in prose is a **non-blocking** nit, fixed in one final wording
+  pass — never a blocker that spins another round.
+- **Do not generate an unmeasured claim** while reviewing prose: no "only", no counts, no
+  line-number lists about a library or the codebase unless you measured it *this* round. If you
+  cannot verify it, omit it or report it as unverified — never raise it as a blocker or as
+  grounds for another round. An unverified assertion raised as a finding is the defect that
+  otherwise spins the loop: the same wrong claim gets "corrected" into a different wrong one,
+  round after round, while the code has been correct since round one.
+- **Exception — prose the code depends on for correctness blocks like code.** A tool description
+  the model reads at runtime, a public API contract, a docstring that states an invariant callers
+  rely on: these are code-adjacent, in scope for the loop, and block when wrong.
+
 ## Personas
 
 ### Config Key Mapping
@@ -193,9 +213,10 @@ Each sub-agent receives the full review content and returns structured findings.
 ### {{Persona Name}}
 {{Persona review lens from above}}
 Return: list of findings, each with a stable ID, **blocks: yes/no** plus a one-line reason
-(see "Blocking is not the same as worth doing" above), file:line, description, and suggested
-fix. For a blocking finding, name the exact check that
-proves the fix worked.
+(see "Blocking is not the same as worth doing" and "Prose is a one-pass concern, not a loop"
+above — a wrong claim in companion prose is non-blocking, but prose the code reads at runtime
+blocks like code), file:line, description, and suggested fix. For a blocking finding, name the
+exact check that proves the fix worked.
 
 {{end}}
 
