@@ -61,6 +61,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - README "Execution profiles (optional)" section documenting all of the above: the full runner
   CLI (`init`/`reserve`/`close`/`status`/`complete`/`preflight`/`scope-digest`), the full
   exit-code table (`2`/`3`/`4`/`5`/`6`/`7`/`8`), and how to opt out.
+- `python3` is now a hard runtime dependency, used by `scripts/devflow-config.py` to resolve
+  execution-profile config.
 
 ### Changed
 

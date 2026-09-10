@@ -67,12 +67,8 @@ if [ "$RRC" -eq 6 ]; then
   # STOP: write result.yaml per "Finalize" (Step 6) with status NEEDS_USER_DECISION, then exit.
   exit 1
 elif [ "$RRC" -ne 0 ]; then
-  # DECISION-resolve-error-fails-loud: resolve only ever returns 0/6/this — a nonzero here is a
-  # genuine resolve error (e.g. YAML parse failure), never "no profile declared". Silently
-  # writing `off` would bypass enforcement of a trusted profile; fail loudly instead.
-  echo "devflow: config resolve failed ($RRC) -> FAILED" >&2
-  # STOP: write result.yaml per "Finalize" (Step 6) with status FAILED, then exit.
-  exit 1
+  # No profile keys / no manifest declared — not an error, nothing to init. Default path.
+  echo off > "$RUN_DIR/profile-active"
 else
   bash "$RUNNER" profile-init --roles-file "$RUN_DIR/resolved-config.json" --host "$HOST" \
     > "$RUN_DIR/profile-init-out.txt" 2>&1

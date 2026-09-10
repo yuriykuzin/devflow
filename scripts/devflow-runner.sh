@@ -870,7 +870,14 @@ cmd_passes() {
 # interface contract in scratchpad/fixwave_spec.md): skills read role bindings from this file,
 # not from --roles-file directly, so a fallback is reflected here as agent -> "" (the default
 # execution path) plus one entry in `fallbacks[]` — never a binding a skill would try to use.
-_devflow_json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+_devflow_json_escape() {
+  local tab cr
+  tab="$(printf '\t')"; cr="$(printf '\r')"
+  printf '%s' "$1" \
+    | sed 's/\\/\\\\/g; s/"/\\"/g' \
+    | sed "s/${tab}/\\\\t/g; s/${cr}/\\\\r/g" \
+    | sed -e ':a' -e '$!{N;ba' -e '}' -e 's/\n/\\n/g'
+}
 
 _devflow_write_effective_roles() {
   local path="$1" impl="$2" rev="$3" lens="$4" ver="$5" fb_list="$6"
@@ -1157,6 +1164,7 @@ cmd_deliverable_id() {
         new_id="impl-$(cat "$RUN_DIR/impl-base")"
       else
         [ -n "$baseline" ] || { echo "NO_BASELINE"; exit 2; }
+        _devflow_passes_validate_id "--baseline" "$baseline"
         new_id="review-$baseline"
       fi
       ;;

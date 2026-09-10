@@ -601,7 +601,7 @@ def cmd_resolve(argv):
         if merged is None:
             return 6
 
-    output = json.dumps(merged, indent=2, sort_keys=True)
+    output = json.dumps(merged, indent=2, sort_keys=True, allow_nan=False)
     print(output)
     return 0
 

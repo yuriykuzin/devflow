@@ -26,6 +26,7 @@ You (in Claude Code):  "devflow:run — add caching for /skills endpoint"
 
 - At least one external CLI tool: `codex` (recommended) or `claude`
 - Bash access (all agentic environments provide this)
+- `python3` (used by `scripts/devflow-config.py` to resolve execution-profile config)
 - **Optional**: [Superpowers](https://github.com/obra/superpowers) plugin for internal workflow skills (brainstorming, TDD, etc.). Devflow works without it but is more powerful with it.
 
 ## Installation
