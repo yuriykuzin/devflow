@@ -1,0 +1,11 @@
+result_contract: 1
+status: FAILED                          # a tool/environment failure, not a content verdict
+deliverable: review-a1b2c3d
+scope_digest: 9e2d701
+revision_reviewed: null                 # no review pass ever produced a verdict
+revision_final: null
+passes: { used: 1, max: 2 }              # the attempt consumed a pass before failing
+evidence:
+  - { kind: external_review, ref: "codex exec --json ...", ref_type: cmd, summary: "codex CLI exited 1: auth error, no verdict produced" }
+blockers: []                            # FAILED has no open findings to resolve -- there is no verdict at all
+artifacts_dir: /home/user/.devflow/run/devflow-run.def456

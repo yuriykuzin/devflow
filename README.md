@@ -176,6 +176,120 @@ output_dir: "docs/devflow/reports"
 
 **Environment overrides** (not config-file keys): `DEVFLOW_RUN_TTL_DAYS` (default `7`) sets how many idle days before an abandoned per-project run dir under `${DEVFLOW_RUN_HOME:-$HOME/.devflow/run}` is auto-reclaimed on the next `dir` call; set it to a non-number to disable the sweep entirely.
 
+### Execution profiles (optional)
+
+`roles` binds devflow's process roles (`implementer`, `reviewer`, `verifier`) to a named host
+subagent instead of the default execution path; `review.max_passes` caps how many reviewer
+passes a single deliverable may consume. `max_passes` counts individual reviewer **calls**, not
+review rounds: on the unbound (default) path, one round dispatches every internal persona plus
+(when configured) one external call, so it costs `(personas + external)` passes, not 1 — set
+`max_passes` at least that high, or bind `roles.reviewer.agent` to a single named agent so a
+round costs exactly one pass. `implement` and `run` share one budget for the same deliverable,
+they don't each get their own. Neither key does anything unless it's set:
+
+```yaml
+roles:
+  implementer: { agent: "" }   # "" = default execution path (host personas/CLI, today's behaviour)
+  reviewer:    { agent: "", lens: "" }
+  verifier:    { agent: "" }
+review:
+  max_passes: 0                # 0 = unlimited — the shipped default, unchanged from before this feature
+  fallback_to_host: false      # true = an unresolvable named agent falls back to the default path
+```
+
+There are two ways to set these bindings:
+
+1. **Inline**, directly under `roles:`/`review:` in `~/.devflow/config.yaml`, as above.
+2. **Via `executor_manifest: <path>`** — a path to a file conforming to
+   [`docs/contracts/executor-manifest-v1.md`](docs/contracts/executor-manifest-v1.md), an
+   agnostic contract that any execution layer can produce (an example producer is
+   claude-orchestrator, which writes `~/.claude/orchestrator/executor-manifest.yaml`, but
+   devflow does not depend on it or on any other specific one). When
+   `executor_manifest` is set and the file exists, its `roles` and `budgets.review_passes` /
+   `budgets.fallback_to_host` **override** the inline values above; the inline block remains as a
+   fallback for anyone without a manifest installed.
+
+**Trust rule**: `roles.*.agent`, `review.max_passes`, `review.fallback_to_host`, and
+`executor_manifest` itself are honoured only from `~/.devflow/config.yaml` and the shipped
+defaults — the same rule as `codex.command_path`. A project-level `.devflow.yaml` can never set
+any of them; an attempt is dropped with a `WARN ignored untrusted key ...` line, never applied
+without a trace. `roles.reviewer.lens` is the one exception — not trust-restricted, since it only names
+which lens a pass used for the report.
+
+**Runner CLI** — the pass budget and preflight are driven by `scripts/devflow-runner.sh`:
+
+- `passes init --deliverable <id> --max <n>` — fixes the review-pass budget for the
+  deliverable's life (`n` ≥ 0; `0` = unlimited). Idempotent: calling it again with the *same*
+  `n` is a no-op; a *different* `n` is refused (the budget doesn't move mid-run — `dir --fresh`
+  is the only reset).
+- `passes reserve --deliverable <id> --call-id <cid>` — charges one pass before a reviewer call.
+  No `--max` flag any more; it reads the budget `init` already fixed and refuses to run if `init`
+  was never called (never defaults to unlimited). The same `--call-id` reserved twice is a no-op,
+  never a double charge.
+- `passes close --deliverable <id> --call-id <cid>` — marks a reserved call closed.
+- `passes status --deliverable <id>` — always exits `0`; prints
+  `used=<u> max=<n|-> open=<call-id,...> done=<yes|no>` (`max=-` when `init` was never called).
+- `passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>` — writes the
+  deliverable's `.done` record once every reservation on it has been closed.
+- `preflight --roles-file <path> --host <host> [--expect-host <h>] [--write-effective <path>]` —
+  checks whether every bound agent is actually usable before a phase starts calling it.
+  `--write-effective <path>` writes `effective-roles.json` on the exit-`0` path only (see
+  "Artifacts" below).
+- `scope-digest [--base <sha>]` — prints a stable digest of the current working tree (tracked +
+  untracked, dirty included), the same content-addressed snapshot the freshness gate already
+  trusts. Skills record it as `result.yaml`'s `scope_digest` and pass it to `passes complete
+  --scope`.
+
+| Command | Exit | Meaning |
+|---|---|---|
+| `passes init` | `0` | Budget written, or already set to the same value. |
+| `passes init` | `2` | `--max` was not a non-negative integer. |
+| `passes init` | `8` | `BUDGET_ALREADY_SET max=<old>` — a *different* budget was already fixed for this deliverable. |
+| `passes reserve` | `0` | Reserved, or the same `--call-id` was already reserved (no-op). |
+| `passes reserve` | `2` | `BUDGET_NOT_INITIALIZED` — `passes init` was never called for this deliverable. |
+| `passes reserve` | `3` | `BUDGET_EXHAUSTED used=<u> max=<n>`. |
+| `passes close` | `0` | Closed. |
+| `passes close` | `1` | No reservation found for that deliverable/call-id. |
+| `passes complete` | `0` | `.done` record written. |
+| `passes complete` | `1` | Open (unclosed) call ids remain for this deliverable. |
+| `preflight` | `0` | Nothing bound, or every binding resolved (or `fallback_to_host: true` downgraded a miss to a reported fallback). |
+| `preflight` | `4` | `MISSING_AGENT role=agent` — a bound agent does not resolve on this host, and `fallback_to_host` is `false`. |
+| `preflight` | `5` | `NO_NAMED_AGENTS host=<h>` — this host doesn't support named-agent delegation at all, and a binding is set anyway, with `fallback_to_host` `false`. |
+| `preflight` | `6` | `INVALID_PROFILE <reason>` — the roles-file's profile shape is invalid (bad version, unknown role, non-integer `max_passes`, non-string `agent`, ...); also returned by `devflow-config.py resolve` for an `executor_manifest` pointing at an unsupported version or a missing file (`ERROR executor_manifest version <v> unsupported` / `ERROR executor_manifest not found <path>`). |
+| `preflight` | `7` | `HOST_MISMATCH manifest=<a> host=<b>` — the resolved manifest's `host` differs from the host actually running this phase; a manifest built for one host's agent catalogue does not apply to another. |
+| `scope-digest` | `0` | Digest printed. |
+| `scope-digest` | `1` | Could not snapshot the working tree. |
+
+**Fallback semantics**: an unresolvable named-agent binding is never substituted without a trace. With
+`review.fallback_to_host: false` (the default) it's a hard preflight error (exit `4`/`5` above).
+With `review.fallback_to_host: true` it's downgraded to a reported fallback — one
+`FALLBACK_TO_HOST role=agent` line on `preflight`'s output — and the fallback is applied *through*
+`effective-roles.json`: that role's `agent` is written as `""` (the default execution path) and
+also listed in `effective-roles.json`'s `fallbacks[]` array, so a skill reading bindings always
+sees which roles fell back and why, never a hidden default.
+
+**Artifacts** written under `RUN_DIR` (`bash scripts/devflow-runner.sh dir`):
+
+- `effective-roles.json` — written by `preflight --write-effective <path>`: the resolved
+  bindings a skill actually uses —
+  `{"implementer":"<agent|''>","reviewer":"<agent|''>","reviewer_lens":"<lens>","verifier":"<agent|''>","fallbacks":[{"role":..,"requested":..}]}`.
+- `passes-<deliverable>.max` — the fixed budget, written once by `passes init`.
+- `passes-<deliverable>.tsv` — the reservation ledger: one line per call-id, reserved/closed epoch.
+- `passes-<deliverable>.done` — the completion record written by `passes complete`
+  (`scope=<digest> closed=<n> verdict=<clean|blockers> ts=<epoch>`).
+- `result.yaml` — the result contract (see below), written on every terminal path.
+
+**Defaults leave behaviour unchanged** — with nothing configured, inline or via manifest
+(`roles.*.agent: ""`, `review.max_passes: 0`, `executor_manifest: ""`), devflow's execution is
+identical to before this feature existed — no agent bindings, no pass limit — **except that
+`result.yaml` is now always written on every terminal path** (additive; nothing reads it unless
+something chooses to). **To disable a profile**, remove (or blank) the keys you set; there is no
+separate "off" flag because absence already means off.
+
+See [`docs/contracts/`](docs/contracts/) for the full schemas — the executor manifest (L1→L2) and
+the result contract (L2→L1, `$RUN_DIR/result.yaml`) — both versioned, agnostic contracts that any
+execution or process layer may implement.
+
 ### Model Tiers
 
 | Role | claude backend | codex backend | Purpose |
