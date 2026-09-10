@@ -1,0 +1,14 @@
+result_contract: 1
+status: NEEDS_USER_DECISION             # pass budget reached with open blockers — human call needed
+deliverable: implement-feature-x
+scope_digest: 7f3a9c1
+revision_reviewed: a1b2c3d
+revision_final: a1b2c3d                 # equal to revision_reviewed: no fix wave ran after the last review
+passes: { used: 2, max: 2 }              # budget exhausted before every blocker closed
+evidence:
+  - { kind: tests, ref: "bash test/run.sh", ref_type: cmd, summary: "ALL PASS (12 case files)" }
+  - { kind: external_review, ref: "docs/devflow/reports/implement-feature-x.md", ref_type: path, summary: "2 blockers open after final pass" }
+blockers:
+  - { id: B1, summary: "unbounded retry loop in scripts/devflow-runner.sh:cmd_passes_reserve" }
+  - { id: B2, summary: "missing test for BUDGET_EXHAUSTED with a mid-run compaction replay" }
+artifacts_dir: /home/user/.devflow/run/devflow-run.abc123

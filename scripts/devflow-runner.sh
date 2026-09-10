@@ -64,6 +64,12 @@ devflow_secure_dir() {
 devflow_secure_dir "$(dirname "$RUN_DIR")"
 devflow_secure_dir "$RUN_DIR"
 
+# Every value-taking flag needs its argument; under `set -u` a bare "$3" on a dangling flag
+# would crash with a raw "unbound variable" instead of the caller's own usage message. Shared
+# across every subcommand's flag parser (not nested in one, so it's defined before any
+# particular cmd_* runs).
+_need_val() { [ "$3" -ge 2 ] || { echo "devflow: $1: $2 requires a value" >&2; exit 2; }; }
+
 # ── opportunistic GC of stale run dirs ───────────────────────────────────────────
 # RUN_DIR is one-per-project-root, so a worktree-per-feature workflow mints a NEW hash every
 # run and `dir --fresh` reuse never reclaims the old ones — completed run dirs would pile up
@@ -96,20 +102,40 @@ devflow_gc_old_runs() {
 # live. `--fresh` wipes it first to start a clean run — clearing a prior feature's phase
 # session files so they aren't silently resumed.
 #
-# `--fresh` is an UNCONDITIONAL wipe: nothing checks whether a call is still in flight. Run it
-# while a `run-external` is running in the same checkout and that call's session/output files
-# are deleted under it, silently. Devflow used to hold a PID lease to refuse exactly this; the
-# lease was removed as over-engineering for a single-user tool, so the rule is now a convention,
-# not an enforced guarantee: one pipeline per checkout at a time, parallel work in git
-# worktrees (a worktree has its own repo root, so its own RUN_DIR hash).
+# `--fresh` refuses to wipe while a run is live: a `$RUN_DIR/.active-<pid>` lease, written by
+# `cmd_run_external` for the duration of its call and removed on its one exit path, names the
+# runner process that is still in flight. `kill -0` on that pid decides liveness; a lease whose
+# pid is gone (a crash, a kill -9 that skipped the cleanup) is stale and is removed on sight, not
+# treated as active. `--force` skips the check entirely, for an operator who knows better. This
+# closes A3: without it, `--fresh` was an UNCONDITIONAL wipe that could delete a live call's
+# session/output files out from under it, silently — one pipeline per checkout at a time was a
+# convention, not an enforced guarantee. (Parallel work still belongs in git worktrees — a
+# worktree has its own repo root, so its own RUN_DIR hash, and never contends on one lease.)
 cmd_dir() {
-  local fresh=0
+  local fresh=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --fresh) fresh=1; shift ;;
+      --force) force=1; shift ;;
       *) echo "devflow: dir: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
+  if [ "$fresh" = "1" ] && [ "$force" != "1" ]; then
+    local lease pid
+    for lease in "$RUN_DIR"/.active-*; do
+      [ -e "$lease" ] || continue   # the glob itself when nothing matches (no nullglob in 3.2)
+      pid="${lease##*/.active-}"
+      case "$pid" in
+        ''|*[!0-9]*) rm -f "$lease" ;;                       # not a pid-shaped lease -> litter, drop it
+        *) if kill -0 "$pid" 2>/dev/null; then
+             echo "RUN_ACTIVE pid=$pid"
+             exit 9
+           else
+             rm -f "$lease"                                 # stale: the pid it named is gone
+           fi ;;
+      esac
+    done
+  fi
   if [ "$fresh" = "1" ]; then
     # A failed rm must NOT fall through to a printed RUN_DIR as if the wipe succeeded (an
     # `&&` short-circuit would skip devflow_secure_dir yet still return 0) — abort loudly.
@@ -372,8 +398,10 @@ devflow_run_external() {
 #
 # The snapshot source: a single review target when --freshness-file/--file names one (a plan
 # file is the whole review target, so its content IS what must not drift), else the worktree.
+# $2 (base override) only ever applies to the worktree flavour — `scope-digest --base <sha>`;
+# a single-file snapshot has no "base" to diff against, its content already IS the whole thing.
 devflow_snapshot_source() {
-  if [ -n "${1:-}" ]; then cat -- "$1"; else devflow_tree_snapshot; fi
+  if [ -n "${1:-}" ]; then cat -- "$1"; else devflow_tree_snapshot "${2:-}"; fi
 }
 
 # What actually gets STORED and compared: one hash line, not the content itself. The content is
@@ -405,7 +433,7 @@ devflow_snapshot_digest() {
   # The source's stderr is SURFACED, not discarded. Emptiness is the only failure the digest
   # itself detects, so anything the source complains about while still exiting 0 (a git hint, a
   # warning from a hook or filter) is the only signal that the snapshot may be incomplete.
-  devflow_snapshot_source "${1:-}" > "$snap" 2>"$snaperr"
+  devflow_snapshot_source "${1:-}" "${2:-}" > "$snap" 2>"$snaperr"
   local src_rc=$?
   # Printed on BOTH paths. On the failure path this IS the reason the callers tell the operator to
   # look for ("see the reason above") — deleting it unread left that message pointing at nothing.
@@ -440,7 +468,8 @@ devflow_snapshot_digest() {
 # while `status`/`diff` are root-relative, so the whole thing runs from the repo root in a
 # subshell — otherwise the same tree snapshots differently depending on the caller's CWD.
 devflow_tree_snapshot() {
-( TOP="$(git rev-parse --show-toplevel)" || exit 1
+( BASE_OVERRIDE="${1:-}"
+  TOP="$(git rev-parse --show-toplevel)" || exit 1
   # `cd ""` SUCCEEDS, so an unset toplevel would slip past `cd ... || exit 1` and snapshot the
   # caller's CWD instead of the repo — a snapshot of the wrong tree, not a detectable failure.
   [ -n "$TOP" ] || exit 1
@@ -462,12 +491,15 @@ devflow_tree_snapshot() {
   # mislabelled `@unborn HEAD`.
   if HEAD_OID="$(git rev-parse --verify --quiet HEAD)"; then
     printf '%s\n' "$HEAD_OID"
-    DIFF_BASE="$HEAD_OID"
+    # BASE_OVERRIDE (scope-digest --base <sha>) only changes what the diff is taken AGAINST;
+    # the HEAD_OID line above always names the actual current HEAD, never the override, so the
+    # digest still identifies which commit the tree sits on.
+    DIFF_BASE="${BASE_OVERRIDE:-$HEAD_OID}"
   else
     printf '@unborn HEAD\n'
     # Asked for, not hardcoded: the empty-tree oid differs under objectFormat=sha256, and the
     # absence of -w is what keeps this read-only (it computes an oid, it writes no object).
-    DIFF_BASE="$(git hash-object -t tree /dev/null)" || exit 1
+    DIFF_BASE="${BASE_OVERRIDE:-$(git hash-object -t tree /dev/null)}" || exit 1
   fi
   # -uall, not the default `-unormal`: normal collapses an untracked DIRECTORY to a single
   # `?? d/`, which left the file boundaries inside it conveyed ONLY by the `###` headers below —
@@ -544,6 +576,648 @@ cmd_freshness_check() {
   return 1
 }
 
+# ── scope-digest (execution profiles: result.yaml `scope_digest`, `passes complete --scope`) ──
+# Prints a stable digest of the CURRENT working tree (tracked + untracked, dirty included) —
+# the same content-addressed snapshot the freshness gate above already computes and trusts, not
+# a second, differently-forgeable notion of "what changed". `--base <sha>` only changes what the
+# diff section is taken against (still reading the actual current tree); with no --base it's
+# relative to HEAD, matching devflow_tree_snapshot's default.
+cmd_scope_digest() {
+  local base=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) _need_val scope-digest --base "$#"; base="$2"; shift 2 ;;
+      *) echo "devflow: scope-digest: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  local digest
+  digest="$(devflow_snapshot_digest "" "$base")" || {
+    echo "devflow: scope-digest: could not snapshot the working tree — see the reason above." >&2
+    exit 1
+  }
+  printf '%s\n' "$digest"
+  exit 0
+}
+
+# ── pass budget (execution profiles: review.max_passes) ─────────────────────────
+# One review pass = one reviewer call (internal agent or external CLI) over a deliverable's
+# agreed scope. `review.max_passes` caps passes PER DELIVERABLE (not per phase), so a caller
+# reserves before making the call and closes afterwards; re-reserving the same --call-id must
+# not charge twice (compaction/resume replays the same id, never a fresh one).
+#
+# State: one file per deliverable, $RUN_DIR/passes-<deliverable>.tsv, one line per call —
+# "<call-id>\t<reserved-epoch>\t<closed-epoch|->" — plus:
+#   passes-<deliverable>.max   the budget, written ONCE by `passes init` (fixed for the
+#                              deliverable's life; `dir --fresh` is the only reset). `reserve`
+#                              no longer takes --max — it reads this file, and refuses to run
+#                              (BUDGET_NOT_INITIALIZED, exit 2) rather than default to unlimited
+#                              if `init` was never called.
+#   passes-<deliverable>.done  written ONCE by `passes complete`, after every reservation on the
+#                              tsv has been closed — the no-double-review record.
+# `used` is simply the tsv line count: closing a call does not un-charge it.
+#
+# Locking: a `mkdir` lock directory, not `flock` — flock(1) is not part of stock macOS, and this
+# script is otherwise plain POSIX-ish bash with no non-builtin locking dependency. `mkdir` is
+# atomic on every filesystem devflow runs on, and a stuck lock (crash mid-reserve) is just a
+# stale directory an operator can rmdir by hand — acceptable for a single-user tool, matching
+# the "hygiene, not a security boundary" posture already documented on devflow_secure_dir.
+_devflow_passes_file()      { printf '%s/passes-%s.tsv'  "$RUN_DIR" "$1"; }
+_devflow_passes_max_file()  { printf '%s/passes-%s.max'  "$RUN_DIR" "$1"; }
+_devflow_passes_done_file() { printf '%s/passes-%s.done' "$RUN_DIR" "$1"; }
+_devflow_passes_lock_dir()  { printf '%s/.passes-%s.lock' "$RUN_DIR" "$1"; }
+
+# Exact call-id match on the tsv's first field — NOT `grep -qF "$cid<TAB>"`, which matches a
+# substring anywhere in the line (a call-id that is a suffix/prefix of another, or one that
+# happens to reappear inside a later field, would false-match and silently no-op a reservation
+# that should have charged, or refuse to close one that should have matched).
+_devflow_passes_has_id() {
+  awk -F'\t' -v c="$2" '$1==c{f=1} END{exit !f}' "$1" 2>/dev/null
+}
+
+_devflow_passes_lock() {
+  local lockdir="$1" n=0
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -ge 50 ] && return 1   # ~5s of contention -> something is stuck, fail loudly
+    sleep 0.1
+  done
+  return 0
+}
+_devflow_passes_unlock() { rmdir "$1" 2>/dev/null || true; }
+
+_devflow_passes_validate_id() {
+  # Shared by --deliverable and --call-id: both are spliced into a filename or a TSV field.
+  local label="$1" val="$2"
+  case "$val" in
+    ''|*[!A-Za-z0-9._-]*|.|..) echo "devflow: passes: $label must match [A-Za-z0-9._-]+ and not be '.' or '..'" >&2; exit 2 ;;
+  esac
+}
+
+cmd_passes_init() {
+  local deliv="" max=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deliverable) _need_val "passes init" --deliverable "$#"; deliv="$2"; shift 2 ;;
+      --max)         _need_val "passes init" --max "$#";         max="$2";  shift 2 ;;
+      *) echo "devflow: passes init: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  _devflow_passes_validate_id "--deliverable" "$deliv"
+  case "$max" in ''|*[!0-9]*) echo "devflow: passes init: --max must be a non-negative integer" >&2; exit 2 ;; esac
+
+  local mf lock
+  mf="$(_devflow_passes_max_file "$deliv")"; lock="$(_devflow_passes_lock_dir "$deliv")"
+  _devflow_passes_lock "$lock" || { echo "devflow: passes init: could not acquire the lock for '$deliv' (timed out)" >&2; exit 1; }
+  if [ -f "$mf" ]; then
+    local old; old="$(cat "$mf")"
+    if [ "$old" != "$max" ]; then
+      _devflow_passes_unlock "$lock"
+      echo "BUDGET_ALREADY_SET max=$old"
+      exit 8
+    fi
+    _devflow_passes_unlock "$lock"
+    exit 0
+  fi
+  printf '%s\n' "$max" > "$mf"
+  _devflow_passes_unlock "$lock"
+  exit 0
+}
+
+cmd_passes_reserve() {
+  local deliv="" cid=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deliverable) _need_val "passes reserve" --deliverable "$#"; deliv="$2"; shift 2 ;;
+      --call-id)     _need_val "passes reserve" --call-id "$#";     cid="$2";  shift 2 ;;
+      *) echo "devflow: passes reserve: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  _devflow_passes_validate_id "--deliverable" "$deliv"
+  _devflow_passes_validate_id "--call-id" "$cid"
+
+  local f mf lock
+  f="$(_devflow_passes_file "$deliv")"; mf="$(_devflow_passes_max_file "$deliv")"; lock="$(_devflow_passes_lock_dir "$deliv")"
+  _devflow_passes_lock "$lock" || { echo "devflow: passes reserve: could not acquire the lock for '$deliv' (timed out)" >&2; exit 1; }
+  # No --max flag any more: reserve reads the budget `init` fixed, and refuses to charge a
+  # deliverable that was never initialized rather than silently treating it as unlimited.
+  if [ ! -f "$mf" ]; then
+    _devflow_passes_unlock "$lock"
+    echo "BUDGET_NOT_INITIALIZED"
+    exit 2
+  fi
+  local max; max="$(cat "$mf")"
+  : > "${f}.touch.$$" 2>/dev/null; rm -f "${f}.touch.$$" 2>/dev/null   # RUN_DIR writability check, cheap
+  touch "$f" 2>/dev/null
+
+  local used
+  used="$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')"; used="${used:-0}"
+
+  # Re-reserving the same call-id is a no-op EXCEPT when it was already closed (field 3 != "-"):
+  # a closed id is a call that already happened and was already charged, so re-dispatching it
+  # (compaction replaying a completed step, say) must be a loud refusal, not a second silent
+  # no-op that lets a caller re-run a call whose verdict is already on the books.
+  if _devflow_passes_has_id "$f" "$cid"; then
+    local closed_at; closed_at="$(awk -F'\t' -v c="$cid" '$1==c{print $3; exit}' "$f")"
+    if [ "$closed_at" != "-" ]; then
+      _devflow_passes_unlock "$lock"
+      echo "CALL_ALREADY_CLOSED call-id=$cid"
+      exit 9
+    fi
+    _devflow_passes_unlock "$lock"
+    if [ "$max" = "0" ]; then echo "remaining=unlimited"; else echo "remaining=$((max - used))"; fi
+    exit 0
+  fi
+
+  if [ "$max" != "0" ] && [ "$used" -ge "$max" ]; then
+    _devflow_passes_unlock "$lock"
+    echo "BUDGET_EXHAUSTED used=$used max=$max"
+    exit 3
+  fi
+
+  printf '%s\t%s\t-\n' "$cid" "$(date +%s)" >> "$f"
+  used=$((used + 1))
+  _devflow_passes_unlock "$lock"
+  if [ "$max" = "0" ]; then echo "remaining=unlimited"; else echo "remaining=$((max - used))"; fi
+  exit 0
+}
+
+cmd_passes_close() {
+  local deliv="" cid=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deliverable) _need_val "passes close" --deliverable "$#"; deliv="$2"; shift 2 ;;
+      --call-id)     _need_val "passes close" --call-id "$#";     cid="$2";  shift 2 ;;
+      *) echo "devflow: passes close: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  _devflow_passes_validate_id "--deliverable" "$deliv"
+  _devflow_passes_validate_id "--call-id" "$cid"
+
+  local f lock
+  f="$(_devflow_passes_file "$deliv")"; lock="$(_devflow_passes_lock_dir "$deliv")"
+  [ -f "$f" ] || { echo "devflow: passes close: no reservation state for deliverable '$deliv'" >&2; exit 1; }
+  _devflow_passes_lock "$lock" || { echo "devflow: passes close: could not acquire the lock for '$deliv' (timed out)" >&2; exit 1; }
+  if ! _devflow_passes_has_id "$f" "$cid"; then
+    _devflow_passes_unlock "$lock"
+    echo "devflow: passes close: no reservation found for call-id '$cid' on deliverable '$deliv'" >&2
+    exit 1
+  fi
+  local tmp; tmp="${f}.tmp.$$"
+  awk -F'\t' -v OFS='\t' -v c="$cid" -v ts="$(date +%s)" '
+    $1==c && $3=="-" { $3=ts } { print }
+  ' "$f" > "$tmp" && mv "$tmp" "$f"
+  _devflow_passes_unlock "$lock"
+  exit 0
+}
+
+cmd_passes_status() {
+  local deliv=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deliverable) _need_val "passes status" --deliverable "$#"; deliv="$2"; shift 2 ;;
+      *) echo "devflow: passes status: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  _devflow_passes_validate_id "--deliverable" "$deliv"
+
+  local f mf df used max open done_str scope
+  f="$(_devflow_passes_file "$deliv")"; mf="$(_devflow_passes_max_file "$deliv")"; df="$(_devflow_passes_done_file "$deliv")"
+  if [ -f "$f" ]; then used="$(wc -l < "$f" | tr -d '[:space:]')"; else used=0; fi
+  if [ -f "$mf" ]; then max="$(cat "$mf")"; else max="-"; fi
+  if [ -f "$f" ]; then open="$(awk -F'\t' '$3=="-"{print $1}' "$f" | paste -sd, - 2>/dev/null)"; else open=""; fi
+  # scope comes from the .done sidecar's own `scope=<digest>` first field (written once by
+  # `passes complete`) — never recomputed here, so a completed record can't drift from what the
+  # reviewer actually saw (A10: this is what makes a no-double-review skip trustworthy).
+  if [ -f "$df" ]; then
+    done_str="yes"
+    local doneline; doneline="$(cat "$df")"
+    scope="${doneline%%$'\t'*}"; scope="${scope#scope=}"
+  else
+    done_str="no"; scope="-"
+  fi
+  echo "used=$used max=$max open=$open done=$done_str scope=$scope"
+  exit 0
+}
+
+cmd_passes_complete() {
+  local deliv="" scope="" verdict=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deliverable) _need_val "passes complete" --deliverable "$#"; deliv="$2";   shift 2 ;;
+      --scope)       _need_val "passes complete" --scope "$#";       scope="$2";   shift 2 ;;
+      --verdict)     _need_val "passes complete" --verdict "$#";     verdict="$2"; shift 2 ;;
+      *) echo "devflow: passes complete: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  _devflow_passes_validate_id "--deliverable" "$deliv"
+  [ -n "$scope" ] || { echo "devflow: passes complete: --scope is required" >&2; exit 2; }
+  case "$verdict" in
+    clean|blockers) ;;
+    *) echo "devflow: passes complete: --verdict must be 'clean' or 'blockers'" >&2; exit 2 ;;
+  esac
+
+  local f lock
+  f="$(_devflow_passes_file "$deliv")"; lock="$(_devflow_passes_lock_dir "$deliv")"
+  _devflow_passes_lock "$lock" || { echo "devflow: passes complete: could not acquire the lock for '$deliv' (timed out)" >&2; exit 1; }
+  local used open
+  if [ -f "$f" ]; then
+    used="$(wc -l < "$f" | tr -d '[:space:]')"
+    open="$(awk -F'\t' '$3=="-"{print $1}' "$f" | paste -sd, - 2>/dev/null)"
+  else
+    used=0; open=""
+  fi
+  if [ -n "$open" ]; then
+    _devflow_passes_unlock "$lock"
+    echo "devflow: passes complete: open call id(s) remain for '$deliv': $open" >&2
+    exit 1
+  fi
+  local df; df="$(_devflow_passes_done_file "$deliv")"
+  printf 'scope=%s\tclosed=%s\tverdict=%s\tts=%s\n' "$scope" "$used" "$verdict" "$(date +%s)" > "$df"
+  _devflow_passes_unlock "$lock"
+  exit 0
+}
+
+cmd_passes() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    init)     cmd_passes_init "$@" ;;
+    reserve)  cmd_passes_reserve "$@" ;;
+    close)    cmd_passes_close "$@" ;;
+    status)   cmd_passes_status "$@" ;;
+    complete) cmd_passes_complete "$@" ;;
+    *) echo "usage: $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>" >&2; exit 2 ;;
+  esac
+}
+
+# ── preflight (execution profiles: is every bound agent actually usable on this host?) ──────
+# Checks two DIFFERENT capabilities: does this host support named-agent delegation at all
+# (today: only Claude Code does), and, where it does, does the named agent actually resolve.
+# An explicitly bound but unresolvable agent is a hard error (exit 4/5) — never a silent
+# fallback to the default execution path — unless `review.fallback_to_host` is set, in which
+# case it's downgraded to exit 0 plus one FALLBACK_TO_HOST line per affected role, still
+# printed so the report shows a fallback happened.
+#
+# `--expect-host` guards against an executor manifest (docs/contracts/executor-manifest-v1.md)
+# generated for a DIFFERENT host than the one actually running this phase: the manifest's
+# `host` field names whose agent catalogue the `roles.*.agent` values refer to, and a role name
+# that happens to exist under a different host is a coincidence, not a resolved binding. When
+# --roles-file carries a `_manifest.host` (only present when devflow-config.py resolve merged
+# in an executor_manifest), it is compared against --expect-host if given, else against --host
+# itself — so a plain `--host <h>` call, with no --expect-host, already catches a manifest built
+# for another host. Absent a manifest (`_manifest.host` empty) this check never fires.
+#
+# `--write-effective <path>` writes effective-roles.json ONLY on the exit-0 path (see the
+# interface contract in scratchpad/fixwave_spec.md): skills read role bindings from this file,
+# not from --roles-file directly, so a fallback is reflected here as agent -> "" (the default
+# execution path) plus one entry in `fallbacks[]` — never a binding a skill would try to use.
+_devflow_json_escape() {
+  local tab cr
+  tab="$(printf '\t')"; cr="$(printf '\r')"
+  printf '%s' "$1" \
+    | sed 's/\\/\\\\/g; s/"/\\"/g' \
+    | sed "s/${tab}/\\\\t/g; s/${cr}/\\\\r/g" \
+    | sed -e ':a' -e '$!{N;ba' -e '}' -e 's/\n/\\n/g'
+}
+
+_devflow_write_effective_roles() {
+  local path="$1" impl="$2" rev="$3" lens="$4" ver="$5" fb_list="$6"
+  local fb_json="[]"
+  if [ -n "$fb_list" ]; then
+    local items="" role req first=1 item
+    while IFS=$'\t' read -r role req; do
+      [ -n "$role" ] || continue
+      item="{\"role\":\"$(_devflow_json_escape "$role")\",\"requested\":\"$(_devflow_json_escape "$req")\"}"
+      if [ "$first" = 1 ]; then items="$item"; first=0; else items="$items,$item"; fi
+    done <<EOF
+$fb_list
+EOF
+    fb_json="[$items]"
+  fi
+  printf '{"implementer":"%s","reviewer":"%s","reviewer_lens":"%s","verifier":"%s","fallbacks":%s}\n' \
+    "$(_devflow_json_escape "$impl")" "$(_devflow_json_escape "$rev")" \
+    "$(_devflow_json_escape "$lens")" "$(_devflow_json_escape "$ver")" "$fb_json" \
+    > "$path" || { echo "devflow: preflight: could not write --write-effective '$path'" >&2; exit 1; }
+}
+
+cmd_preflight() {
+  local roles_file="" host="" expect_host="" write_effective=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --roles-file)      _need_val preflight --roles-file "$#";      roles_file="$2";      shift 2 ;;
+      --host)            _need_val preflight --host "$#";            host="$2";            shift 2 ;;
+      --expect-host)     _need_val preflight --expect-host "$#";     expect_host="$2";      shift 2 ;;
+      --write-effective) _need_val preflight --write-effective "$#"; write_effective="$2"; shift 2 ;;
+      *) echo "devflow: preflight: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$roles_file" ] && [ -f "$roles_file" ] || { echo "devflow: preflight: --roles-file <path> is required and must exist" >&2; exit 2; }
+  case "$host" in
+    claude|codex|gemini|cursor|opencode) ;;
+    *) echo "devflow: preflight: --host must be one of claude|codex|gemini|cursor|opencode" >&2; exit 2 ;;
+  esac
+  [ -n "$expect_host" ] || expect_host="$host"
+
+  local cfgc="$SELF_DIR/devflow-config.py" fields frc
+  fields="$(python3 "$cfgc" fields "$roles_file" 2>&1)"; frc=$?
+  # exit 6 from `fields` means the roles-file itself is well-formed but its profile shape is
+  # invalid (bad version, unknown role, non-int max_passes, ...) — `fields` already printed
+  # exactly the one `INVALID_PROFILE <reason>` line preflight reports verbatim.
+  if [ "$frc" -eq 6 ]; then
+    echo "$fields"
+    exit 6
+  fi
+  if [ "$frc" -ne 0 ]; then
+    echo "devflow: preflight: could not read --roles-file '$roles_file':" >&2
+    printf '%s\n' "$fields" >&2
+    exit 2
+  fi
+
+  local agent_implementer="" agent_reviewer="" reviewer_lens="" agent_verifier="" fallback="false" manifest_host="" k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      roles.implementer.agent) agent_implementer="$v" ;;
+      roles.reviewer.agent)    agent_reviewer="$v" ;;
+      roles.reviewer.lens)     reviewer_lens="$v" ;;
+      roles.verifier.agent)    agent_verifier="$v" ;;
+      review.fallback_to_host) fallback="$v" ;;
+      _manifest.host)          manifest_host="$v" ;;
+    esac
+  done <<EOF
+$fields
+EOF
+
+  if [ -n "$manifest_host" ] && [ "$manifest_host" != "$expect_host" ]; then
+    echo "HOST_MISMATCH manifest=$manifest_host host=$expect_host"
+    exit 7
+  fi
+
+  # No associative arrays (bash 3.2 on stock macOS): three named roles, parallel positional lists.
+  # role_effective starts as a copy of the requested bindings and is blanked to "" per role when
+  # that role's binding falls back — this is what gets written to effective-roles.json.
+  local -a role_names=(implementer reviewer verifier)
+  local -a role_agents=("$agent_implementer" "$agent_reviewer" "$agent_verifier")
+  local -a role_effective=("$agent_implementer" "$agent_reviewer" "$agent_verifier")
+  local any_binding=0 blocked=0 idx role name fallback_list=""
+
+  for idx in 0 1 2; do
+    role="${role_names[$idx]}"; name="${role_agents[$idx]}"
+    [ -n "$name" ] || continue
+    any_binding=1
+    if [ "$host" = "claude" ]; then
+      local ok=0
+      if [ -n "${DEVFLOW_AGENTS_DIR:-}" ]; then
+        [ -f "$DEVFLOW_AGENTS_DIR/$name.md" ] && ok=1
+      else
+        [ -f "$HOME/.claude/agents/$name.md" ] && ok=1
+        [ -f "$DEVFLOW_PROJECT_ROOT/.claude/agents/$name.md" ] && ok=1
+      fi
+      if [ "$ok" -ne 1 ]; then
+        if [ "$fallback" = "true" ]; then
+          echo "FALLBACK_TO_HOST $role=$name"
+          role_effective[$idx]=""
+          # R1: NOT `$(printf '%s\t%s\n' ...)` — command substitution strips the trailing
+          # newline, so two fallbacks concatenated into one line and the reader below (which
+          # splits on TAB) put a raw TAB inside a JSON string. Real TAB + real newline instead.
+          fallback_list="${fallback_list}${role}"$'\t'"${name}"$'\n'
+        else
+          echo "MISSING_AGENT $role=$name"
+          blocked=1
+        fi
+      fi
+    else
+      # Named-agent delegation itself isn't supported on this host yet — every non-empty
+      # binding is affected, reported once per role when falling back.
+      if [ "$fallback" = "true" ]; then
+        echo "FALLBACK_TO_HOST $role=$name"
+        role_effective[$idx]=""
+        fallback_list="${fallback_list}${role}"$'\t'"${name}"$'\n'
+      fi
+    fi
+  done
+
+  if [ "$host" != "claude" ] && [ "$any_binding" = "1" ] && [ "$fallback" != "true" ]; then
+    echo "NO_NAMED_AGENTS host=$host"
+    exit 5
+  fi
+  [ "$blocked" = "1" ] && exit 4
+
+  [ -z "$write_effective" ] || _devflow_write_effective_roles \
+    "$write_effective" "${role_effective[0]}" "${role_effective[1]}" "$reviewer_lens" "${role_effective[2]}" "$fallback_list"
+  exit 0
+}
+
+# ── profile-init (execution profiles: the one Step-1 call every skill makes) ────────────────
+# Replaces the resolve/max-passes/fields/preflight block every skill used to copy-paste: this is
+# the single place that classifies a resolved config into off/declared/active AND runs the
+# preflight (agent resolution + HOST_MISMATCH) whenever that classification isn't `off` — closing
+# A12 (a manifest with no bindings and max_passes=0 used to skip preflight entirely, so a
+# manifest built for the wrong host was never caught) and R2 (a stale effective-roles.json from
+# a profile that has since been turned off can no longer survive: `off` deletes it).
+#
+#   active   = any roles.*.agent is non-empty, OR review.max_passes > 0.
+#   declared = a profile shape exists (`_manifest.host` non-empty, or a `roles` key present) but
+#              nothing is bound and max_passes is 0.
+#   off      = neither.
+_devflow_profile_shape() {
+  # Small, deliberately NOT routed through cmd_preflight: reading two leaf values (max_passes,
+  # whether a `roles` key exists at all) is plain JSON introspection, not the agent-resolution
+  # logic (per-role file checks, fallback, HOST_MISMATCH) that cmd_preflight owns and this
+  # function must not duplicate. --roles-file here is always resolved-config.json (valid JSON,
+  # produced by `devflow-config.py resolve`), and its SHAPE was already validated by the `fields`
+  # call in cmd_profile_init before this ever runs.
+  python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+rev = d.get("review")
+mp = rev.get("max_passes", 0) if isinstance(rev, dict) else 0
+print(mp)
+print("1" if isinstance(d.get("roles"), dict) else "0")
+' "$1"
+}
+
+cmd_profile_init() {
+  local roles_file="" host="" expect_host=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --roles-file)  _need_val profile-init --roles-file "$#";  roles_file="$2";  shift 2 ;;
+      --host)        _need_val profile-init --host "$#";        host="$2";        shift 2 ;;
+      --expect-host) _need_val profile-init --expect-host "$#"; expect_host="$2"; shift 2 ;;
+      *) echo "devflow: profile-init: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$roles_file" ] && [ -f "$roles_file" ] || { echo "devflow: profile-init: --roles-file <path> is required and must exist" >&2; exit 2; }
+  case "$host" in
+    claude|codex|gemini|cursor|opencode) ;;
+    *) echo "devflow: profile-init: --host must be one of claude|codex|gemini|cursor|opencode" >&2; exit 2 ;;
+  esac
+
+  # `fields` runs validate_profile (config.py) — an invalid profile shape is reported here,
+  # before any state classification or agent-resolution work happens.
+  local cfgc="$SELF_DIR/devflow-config.py" fields frc
+  fields="$(python3 "$cfgc" fields "$roles_file" 2>&1)"; frc=$?
+  if [ "$frc" -eq 6 ]; then echo "$fields"; exit 6; fi
+  if [ "$frc" -ne 0 ]; then
+    echo "devflow: profile-init: could not read --roles-file '$roles_file':" >&2
+    printf '%s\n' "$fields" >&2
+    exit 2
+  fi
+
+  local agent_implementer="" agent_reviewer="" agent_verifier="" manifest_host="" k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      roles.implementer.agent) agent_implementer="$v" ;;
+      roles.reviewer.agent)    agent_reviewer="$v" ;;
+      roles.verifier.agent)    agent_verifier="$v" ;;
+      _manifest.host)          manifest_host="$v" ;;
+    esac
+  done <<EOF
+$fields
+EOF
+
+  local shape shape_rc max_passes has_roles
+  shape="$(_devflow_profile_shape "$roles_file" 2>&1)"; shape_rc=$?
+  if [ "$shape_rc" -ne 0 ]; then
+    echo "devflow: profile-init: could not read --roles-file '$roles_file' as JSON:" >&2
+    printf '%s\n' "$shape" >&2
+    exit 2
+  fi
+  max_passes="$(printf '%s\n' "$shape" | sed -n '1p')"
+  has_roles="$(printf '%s\n' "$shape" | sed -n '2p')"
+
+  local any_binding=0
+  [ -n "$agent_implementer$agent_reviewer$agent_verifier" ] && any_binding=1
+
+  local state
+  if [ "$any_binding" = "1" ] || [ "${max_passes:-0}" -gt 0 ]; then
+    state="active"
+  elif [ -n "$manifest_host" ] || [ "$has_roles" = "1" ]; then
+    state="declared"
+  else
+    state="off"
+  fi
+
+  # effective-roles.json describes THIS resolved config: stale content from an earlier call (or
+  # an earlier, since-turned-off profile) must never survive under a new verdict.
+  rm -f "$RUN_DIR/effective-roles.json"
+
+  if [ "$state" != "off" ]; then
+    local -a pf_args=(--roles-file "$roles_file" --host "$host" --write-effective "$RUN_DIR/effective-roles.json")
+    [ -n "$expect_host" ] && pf_args+=(--expect-host "$expect_host")
+    # Run in a subshell (via command substitution): cmd_preflight ends every path with `exit`,
+    # and calling it directly here would terminate this whole script instead of just reporting
+    # back to the caller.
+    local pf_out pf_rc
+    pf_out="$(cmd_preflight "${pf_args[@]}")"; pf_rc=$?
+    [ -n "$pf_out" ] && printf '%s\n' "$pf_out"
+    case "$pf_rc" in
+      0) ;;
+      4|5|6|7) exit "$pf_rc" ;;
+      *) exit 2 ;;
+    esac
+  fi
+
+  printf '%s\n' "$state" > "$RUN_DIR/profile-active"
+  printf '%s\n' "${max_passes:-0}" > "$RUN_DIR/max-passes"
+  echo "profile=$state max_passes=${max_passes:-0}"
+  exit 0
+}
+
+# ── deliverable-id (execution profiles: the one place a deliverable id is computed) ─────────
+# Closes R3 (a standalone review's own Bash block computed `review-<baseline>` with $BASELINE
+# unset, because BASELINE only existed in a DIFFERENT step's scope) and A3's stale-impl-base
+# half, by making id computation a single call whose result is persisted to $RUN_DIR/deliverable
+# instead of recomputed inline by each phase.
+cmd_deliverable_id() {
+  local phase="" plan_path="" baseline=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --phase)     _need_val deliverable-id --phase "$#";     phase="$2";     shift 2 ;;
+      --plan-path) _need_val deliverable-id --plan-path "$#"; plan_path="$2"; shift 2 ;;
+      --baseline)  _need_val deliverable-id --baseline "$#";  baseline="$2";  shift 2 ;;
+      *) echo "devflow: deliverable-id: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  case "$phase" in
+    plan|impl|review) ;;
+    *) echo "devflow: deliverable-id: --phase must be one of plan|impl|review" >&2; exit 2 ;;
+  esac
+
+  local new_id
+  case "$phase" in
+    plan)
+      [ -n "$plan_path" ] || { echo "devflow: deliverable-id: --plan-path is required for --phase plan" >&2; exit 2; }
+      local sha
+      sha="$(printf '%s' "$plan_path" | _devflow_strong_hash)" \
+        || { echo "devflow: deliverable-id: no shasum/sha256sum available" >&2; exit 1; }
+      new_id="plan-$sha"
+      ;;
+    impl)
+      [ -s "$RUN_DIR/impl-base" ] || { echo "NO_IMPL_BASE"; exit 2; }
+      new_id="impl-$(cat "$RUN_DIR/impl-base")"
+      ;;
+    review)
+      # devflow-run owns `pipeline` (written at its own Step 1, removed at its final step): its
+      # presence alongside impl-base means THIS review is part of a run that already has an
+      # implementation deliverable to review, so review inherits impl's id rather than minting
+      # its own — a standalone review (no pipeline) always needs an explicit --baseline instead.
+      if [ -s "$RUN_DIR/impl-base" ] && [ -f "$RUN_DIR/pipeline" ]; then
+        new_id="impl-$(cat "$RUN_DIR/impl-base")"
+      else
+        [ -n "$baseline" ] || { echo "NO_BASELINE"; exit 2; }
+        _devflow_passes_validate_id "--baseline" "$baseline"
+        new_id="review-$baseline"
+      fi
+      ;;
+  esac
+
+  # Idempotent: re-running the SAME phase with the SAME inputs just re-writes the same id. A
+  # DIFFERENT id recorded for the SAME phase is loud and refused (never a silent second budget
+  # against a deliverable the caller thinks is still the first one); a different PHASE computing
+  # its own (naturally different) id is expected and simply overwrites — deliverable-phase is
+  # what lets this tell the two cases apart.
+  local df="$RUN_DIR/deliverable" pf="$RUN_DIR/deliverable-phase"
+  if [ -s "$df" ]; then
+    local old_id old_phase
+    old_id="$(cat "$df")"
+    old_phase="$(cat "$pf" 2>/dev/null)"
+    if [ "$old_id" != "$new_id" ] && [ "$old_phase" = "$phase" ]; then
+      echo "DELIVERABLE_CHANGED old=$old_id new=$new_id"
+      exit 8
+    fi
+  fi
+  printf '%s\n' "$new_id" > "$df"
+  printf '%s\n' "$phase" > "$pf"
+  printf '%s\n' "$new_id"
+  exit 0
+}
+
+# ── result-write (execution profiles: atomic result.yaml writes for all four skills) ────────
+# Closes A6: every Finalize block writes its result block through this one mechanism —
+# tmp-then-mv — instead of each skill redirecting straight into result.yaml and risking a
+# truncated file if the write is interrupted partway.
+cmd_result_write() {
+  local path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --path) _need_val result-write --path "$#"; path="$2"; shift 2 ;;
+      *) echo "devflow: result-write: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$path" ] || { echo "devflow: result-write: --path is required" >&2; exit 2; }
+  local tmp="${path}.tmp.$$"
+  if ! cat > "$tmp"; then
+    echo "devflow: result-write: could not write '$tmp'" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+  if ! mv "$tmp" "$path"; then
+    echo "devflow: result-write: could not move '$tmp' to '$path'" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+  exit 0
+}
+
 # Inputs: CODEX_EXIT, EVENTS, OUT, STDERR, BACKEND, CALL_RESULT, EXTRACTOR_FAILED.
 # Returns 0 if the call is usable; non-zero (escalate) otherwise.
 #
@@ -576,26 +1250,23 @@ devflow_after_call() {
 cmd_run_external() {
   PHASE=""; local PROMPT_FILE=""; RESUME_ID=""; local ROLE="reviewer"; local FRESHNESS="false"; local FRESHNESS_FILE=""
   BACKEND=""; MODEL=""; EFFORT=""; SESSION_REUSE="true"
-  # Every value-taking flag needs its argument; under `set -u` a bare "$2" on a dangling flag
-  # would crash with a raw "unbound variable" instead of this function's own usage message.
-  _need_val() { [ "$2" -ge 2 ] || { echo "devflow: run-external: $1 requires a value" >&2; exit 2; }; }
   while [ $# -gt 0 ]; do
     case "$1" in
-      --phase)            _need_val --phase "$#";        PHASE="$2"; shift 2 ;;
-      --prompt-file)      _need_val --prompt-file "$#";  PROMPT_FILE="$2"; shift 2 ;;
-      --backend)          _need_val --backend "$#";      BACKEND="$2"; shift 2 ;;
-      --model)            _need_val --model "$#";        MODEL="$2"; shift 2 ;;
-      --effort)           _need_val --effort "$#";       EFFORT="$2"; shift 2 ;;
+      --phase)            _need_val run-external --phase "$#";        PHASE="$2"; shift 2 ;;
+      --prompt-file)      _need_val run-external --prompt-file "$#";  PROMPT_FILE="$2"; shift 2 ;;
+      --backend)          _need_val run-external --backend "$#";      BACKEND="$2"; shift 2 ;;
+      --model)            _need_val run-external --model "$#";        MODEL="$2"; shift 2 ;;
+      --effort)           _need_val run-external --effort "$#";       EFFORT="$2"; shift 2 ;;
       # An EMPTY value is legal and means "fresh session" (both backends branch on [ -n ] before
       # passing anything to the CLI), so callers pass it UNCONDITIONALLY — never spliced in with a
       # shell conditional. See "Always pass --resume unconditionally" in cross-tool-runner.md.
-      --resume)           _need_val --resume "$#";       RESUME_ID="$2"; shift 2 ;;
-      --role)             _need_val --role "$#";         ROLE="$2"; shift 2 ;;
+      --resume)           _need_val run-external --resume "$#";       RESUME_ID="$2"; shift 2 ;;
+      --role)             _need_val run-external --role "$#";         ROLE="$2"; shift 2 ;;
       --no-session-reuse) SESSION_REUSE="false"; shift ;;
       # Take the freshness snapshot and promote it only if this call produced a real review.
       --freshness)        FRESHNESS="true"; shift ;;
       # Snapshot this one file instead of the worktree (the plan phase reviews a single file).
-      --freshness-file)   _need_val --freshness-file "$#"; FRESHNESS="true"; FRESHNESS_FILE="$2"; shift 2 ;;
+      --freshness-file)   _need_val run-external --freshness-file "$#"; FRESHNESS="true"; FRESHNESS_FILE="$2"; shift 2 ;;
       *) echo "devflow: run-external: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
@@ -626,6 +1297,15 @@ cmd_run_external() {
     BIN="$(command -v claude)"
     [ -n "$BIN" ] || { echo "devflow: FATAL — claude CLI not found on PATH." >&2; exit 1; }
   fi
+
+  # R3: claim the active-run lease for `dir --fresh` (see cmd_dir) right before the actual
+  # long-running work starts — not on the flag-validation exits above, which never ran anything
+  # a wipe could clobber. $$ is THIS script process, which stays alive for the whole poll loop
+  # below, so its liveness is exactly what `dir --fresh` needs to check. Removed on this
+  # function's one exit path (the `return` at the very end) — no trap, matching the rest of the
+  # script's "hygiene, not a security boundary" posture: a killed process leaves a stale lease
+  # that `dir --fresh` itself detects and discards via `kill -0`.
+  : > "$RUN_DIR/.active-$$" 2>/dev/null
 
   # CALL_RESULT/SESSION_ID are only ever assigned past the poll loop in devflow_run_external
   # — its hard-cap timeout path `return`s before reaching that point. Initialize both so the
@@ -696,6 +1376,7 @@ cmd_run_external() {
     if [ "$after_exit" -eq 0 ]; then echo "TREE_FILE=$RUN_DIR/$PHASE.tree"
     else echo "TREE_FILE="; fi
   fi
+  rm -f "$RUN_DIR/.active-$$"   # R3: release the active-run lease — this is the one exit path
   return "$after_exit"
 }
 
@@ -706,7 +1387,24 @@ main() {
     dir)              cmd_dir "$@" ;;
     run-external)     cmd_run_external "$@" ;;
     freshness-check)  cmd_freshness_check "$@" ;;
-    *) echo "usage: $(basename "$0") dir [--fresh] | run-external --backend <codex|claude> --model <m> --effort <e> --phase <p> --prompt-file <f> [--role reviewer|implementer] [--resume <id>] [--no-session-reuse] [--freshness | --freshness-file <path>] | freshness-check --phase <p> [--file <path>]" >&2; exit 2 ;;
+    scope-digest)     cmd_scope_digest "$@" ;;
+    passes)           cmd_passes "$@" ;;
+    preflight)        cmd_preflight "$@" ;;
+    profile-init)     cmd_profile_init "$@" ;;
+    deliverable-id)   cmd_deliverable_id "$@" ;;
+    result-write)     cmd_result_write "$@" ;;
+    *)
+      {
+        echo "usage: $(basename "$0") dir [--fresh] [--force] (--fresh exit 9 RUN_ACTIVE pid=<n> while a run is live; --force overrides)"
+        echo "       $(basename "$0") run-external --backend <codex|claude> --model <m> --effort <e> --phase <p> --prompt-file <f> [--role reviewer|implementer] [--resume <id>] [--no-session-reuse] [--freshness | --freshness-file <path>]"
+        echo "       $(basename "$0") freshness-check --phase <p> [--file <path>] | scope-digest [--base <sha>]"
+        echo "       $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> (exit 2 BUDGET_NOT_INITIALIZED, 3 BUDGET_EXHAUSTED, 9 CALL_ALREADY_CLOSED) | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>"
+        echo "       $(basename "$0") preflight --roles-file <path> --host <claude|codex|gemini|cursor|opencode> [--expect-host <h>] [--write-effective <path>] (exit 4 MISSING_AGENT, 5 NO_NAMED_AGENTS, 6 INVALID_PROFILE, 7 HOST_MISMATCH)"
+        echo "       $(basename "$0") profile-init --roles-file <path> --host <claude|codex|gemini|cursor|opencode> [--expect-host <h>] (writes profile-active/max-passes/effective-roles.json; same exit codes as preflight, plus 2 for a bad --roles-file)"
+        echo "       $(basename "$0") deliverable-id --phase <plan|impl|review> [--plan-path <p>] [--baseline <sha>] (exit 2 NO_IMPL_BASE/NO_BASELINE, 8 DELIVERABLE_CHANGED old=<x> new=<y>)"
+        echo "       $(basename "$0") result-write --path <p> (reads the result body on stdin; writes it atomically; exit 0/1)"
+      } >&2
+      exit 2 ;;
   esac
 }
 

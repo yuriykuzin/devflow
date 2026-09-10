@@ -1,0 +1,15 @@
+result_contract: 1
+status: DONE                            # internal personas only -- no external reviewer call at all
+deliverable: impl-a1b2c3d
+scope_digest: 4c8f012
+revision_reviewed: a1b2c3d
+revision_final: a1b2c3d
+passes: { used: 1, max: 2 }
+evidence:
+  - { kind: tests, ref: "bash test/run.sh", ref_type: cmd, summary: "ALL PASS (12 case files)" }
+  - { kind: verifier, ref: "docs/devflow/reports/impl-a1b2c3d.md", ref_type: path, summary: "3 internal personas (architect/security/qa), no external_review evidence entry" }
+blockers: []
+artifacts_dir: /home/user/.devflow/run/devflow-run.ghi789
+# `devflow-runner.sh passes complete --deliverable impl-a1b2c3d --scope 4c8f012` was called at
+# the end of this pass -- THAT is what makes this deliverable re-review-skippable later, not the
+# presence (or absence) of an external_review evidence entry.

@@ -3,6 +3,50 @@
 # Per-project overrides: place .devflow.yaml in project root.
 
 # ──────────────────────────────────────────────────────────────
+# EXECUTION PROFILES — devflow's process roles bound to a host tool's agents
+# ──────────────────────────────────────────────────────────────
+# `roles` maps devflow's process roles (implementer/reviewer/verifier) onto a host subagent
+# name; an empty `agent: ""` means "use the default execution path" (host personas/CLI, exactly
+# today's behaviour). `review.max_passes` caps how many reviewer passes a single deliverable may
+# consume (0 = unlimited = current behaviour); passes are counted per deliverable, not per phase,
+# so `implement` and `run`'s re-review of the same result share one budget.
+#
+# The budget is FIXED for a deliverable's life by `scripts/devflow-runner.sh passes init
+# --deliverable <id> --max <n>` — the one place `max_passes` is written to disk. `passes reserve`
+# no longer takes a `--max` flag; it only reads the value `init` wrote, and refuses to charge
+# a deliverable that was never initialized (`BUDGET_NOT_INITIALIZED`) rather than default to
+# unlimited. On the unbound path (no `roles.*.agent` set), one review round costs (personas +
+# external calls) passes, not one — set `max_passes` at least that high, or bind
+# `roles.reviewer.agent` to a single named agent to make a round cost exactly one pass.
+#
+# TRUST RULE (same as codex.command_path below): `roles.*.agent`, `review.max_passes`, and
+# `review.fallback_to_host` are read from ~/.devflow/config.yaml and this file ONLY. A
+# project-level .devflow.yaml can NEVER set them — a cloned repo must not be able to redirect
+# devflow's role bindings or lift its own review budget. `roles.reviewer.lens` is NOT
+# trust-restricted (it just names which lens a pass used for the report).
+#
+# Absence of a key is NOT the same as `agent: ""` — the former means "this layer didn't decide",
+# the latter explicitly selects the default path. Without a profile installed, nothing here
+# changes devflow's behaviour: no agent bindings, no pass limit.
+profile_version: 1
+roles:
+  implementer: { agent: "" }   # host subagent name; "" = default execution path
+  reviewer:    { agent: "", lens: "" }
+  verifier:    { agent: "" }
+review:
+  max_passes: 0                # 0 = unlimited (current behaviour); passes are counted per deliverable
+  fallback_to_host: false      # true = an unresolvable named agent falls back to the default path
+
+# EXECUTOR MANIFEST — an execution layer's role bindings, published as an agnostic contract
+# (see docs/contracts/executor-manifest-v1.md). Path to a manifest file; "" = no manifest (the
+# `roles`/`review` above are the only source, as today). Global-only, same trust rule as `roles`
+# above and `codex.command_path` — a project .devflow.yaml can never set this. When set and the
+# file exists, the manifest's `roles` and `budgets.review_passes`/`budgets.fallback_to_host`
+# override the inline `roles`/`review` above; the inline block stays as a fallback for anyone
+# without a manifest installed.
+executor_manifest: ""
+
+# ──────────────────────────────────────────────────────────────
 # EXTERNAL REVIEW — resolved by HOST, not by one global switch
 # ──────────────────────────────────────────────────────────────
 # The value of an external review is a DIFFERENT tool's eyes, so which backend to call

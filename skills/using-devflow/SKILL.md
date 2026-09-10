@@ -36,6 +36,16 @@ Devflow merges config from three layers, first setter wins:
 If nothing overrides, the shipped defaults apply. The exec-path key `command_path` is honoured
 only from the global and default layers — never a project `.devflow.yaml`. See cross-tool-runner.md's "Config" section for the canonical merge.
 
+### Execution profiles (optional)
+
+`roles`/`review.max_passes` bind process roles to named host subagents and cap reviewer passes
+per deliverable (or `executor_manifest` supplies both from an external file — same trust rule as
+`command_path`). A phase runs `passes init --deliverable <id> --max <n>` once and `passes
+complete --deliverable <id> --scope <digest> --verdict <clean|blockers>` at the end; it reads
+bindings only from `$RUN_DIR/effective-roles.json` (written by `preflight --write-effective`),
+and writes `$RUN_DIR/result.yaml` on every terminal path. Full CLI, exit codes, and config
+reference: see README's "Execution profiles (optional)" section.
+
 ## Backend Switching
 
 Devflow supports multiple CLI backends. Each has its own section with reviewer/implementer

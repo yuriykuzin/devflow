@@ -7,6 +7,9 @@ description: "Cross-tool review of existing code or changes. Use when the user w
 
 Send existing code changes to an external AI tool for review. Standalone skill — does not require prior planning or implementation through devflow.
 
+Without an execution profile (all `roles.*.agent` empty and `max_passes: 0`) this skill
+behaves as before, plus it writes `result.yaml` on every terminal path (see Step 6, Finalize).
+
 ## When to Use
 
 - User says "review my changes" or "devflow:review"
@@ -41,8 +44,62 @@ canonical rule. `command_path` stays with the runner
 `skills/using-devflow/references/cross-tool-runner.md`. `RUN_DIR` is deterministic per
 project (a hash of the repo root), so a standalone `devflow:review` in a checkout that ran
 devflow before attaches to whatever session files are already there. If that's not what you
-want (old session, or a `--resume` below fails on an expired session), run `bash "$RUNNER"
-dir --fresh` first to start clean.
+want (stale session, or a `--resume` below fails on an expired session), run `bash "$RUNNER"
+dir --fresh` first to start clean — only `devflow:run`'s user-initiated start (its own Step 0)
+does that automatically.
+
+**Execution profile — one `profile-init` call.** Runs at the start of every phase. Shell state
+does not survive between Bash calls, so this re-reads config independently every time (cheap,
+idempotent). `profile-init` is the single place that resolves the profile, runs preflight when
+one is declared, and records the result — no skill computes `MAX_PASSES`/bindings by hand:
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+CFGC="$(dirname "$RUNNER")/devflow-config.py"
+HOST=claude   # <- set this to the tool actually executing this skill (claude|codex|gemini|cursor|opencode) —
+              # you know it without asking, same host used for "Which backend reviews". If it
+              # cannot be determined, STOP as NEEDS_USER_DECISION instead of guessing — no
+              # auto-detection is done on the runner side.
+
+python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RRC=$?
+if [ "$RRC" -eq 6 ]; then
+  echo "devflow: invalid execution profile in resolved config -> NEEDS_USER_DECISION" >&2
+  # STOP: write result.yaml per "Finalize" (Step 6) with status NEEDS_USER_DECISION, then exit.
+  exit 1
+elif [ "$RRC" -ne 0 ]; then
+  # No profile keys / no manifest declared — not an error, nothing to init. Default path.
+  echo off > "$RUN_DIR/profile-active"
+else
+  bash "$RUNNER" profile-init --roles-file "$RUN_DIR/resolved-config.json" --host "$HOST" \
+    > "$RUN_DIR/profile-init-out.txt" 2>&1
+  PI_RC=$?
+  [ -s "$RUN_DIR/profile-init-out.txt" ] && cat "$RUN_DIR/profile-init-out.txt"   # fallbacks[] + profile=<state> max_passes=<n> echoed into the report
+  case "$PI_RC" in
+    0) : ;;
+    6|4|5|7)
+      echo "devflow: profile-init failed ($PI_RC) -> NEEDS_USER_DECISION: $(cat "$RUN_DIR/profile-init-out.txt")" >&2
+      # STOP: write result.yaml per "Finalize" (Step 6) with status NEEDS_USER_DECISION, then exit.
+      exit 1 ;;
+    *)
+      echo "devflow: profile-init failed ($PI_RC) -> FAILED: $(cat "$RUN_DIR/profile-init-out.txt")" >&2
+      exit 1 ;;
+  esac
+fi
+PROFILE="$(cat "$RUN_DIR/profile-active" 2>/dev/null || echo off)"
+echo "Execution profile: $PROFILE"
+```
+
+`$RUN_DIR/profile-active` is exactly one of `off` | `declared` | `active` — every later step in
+this skill reads it fresh from that file (`PROFILE="$(cat "$RUN_DIR/profile-active")"`), never
+from a shell variable carried across Bash calls. When `off`, the rest of this skill runs exactly
+as documented below with **no** `passes init`/`reserve`/`close`/`complete` calls at all. When
+`declared` or `active`, role bindings live in `$RUN_DIR/effective-roles.json` (written by
+`profile-init`, deleted when the state is `off`); budget calls (`init`/`reserve`/`close`/
+`complete`) run only when `PROFILE = active`.
+
+**Unbound-path cost.** When no role is bound, one review round still costs (enabled personas +
+the external call) reviewer passes against `max_passes` — there is no free lane just because
+nothing is delegated to a named agent.
 
 ### Step 2: Determine Scope
 
@@ -72,12 +129,112 @@ git diff HEAD --stat
 gh pr diff <number> --stat
 ```
 
+**Baseline, persisted before any deliverable id is computed** (R3, A3): the commit the changeset
+starts FROM, by `SCOPE_MODE` — same resolution Step 4's case uses, run here first so
+`$RUN_DIR/baseline` exists before Step 3 ever calls `deliverable-id`:
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+case "$SCOPE_MODE" in
+  uncommitted|staged|files) BASELINE="$(git rev-parse HEAD)" ;;
+  last-commit) git rev-parse --verify -q HEAD^ >/dev/null || { echo "devflow: last-commit needs >=2 commits" >&2; exit 1; }
+               BASELINE="$(git rev-parse HEAD^)" ;;
+  pr)          BR="$(gh pr view "$PR" --json baseRefOid -q .baseRefOid 2>/dev/null)"
+               BASELINE=""
+               if [ -n "$BR" ] && git cat-file -e "${BR}^{commit}" 2>/dev/null; then
+                 BASELINE="$(git merge-base HEAD "$BR" 2>/dev/null)"
+               fi ;;
+  branch)      BASE="${BASE:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)}"
+               BASELINE="$(git merge-base HEAD "$BASE")"; [ -n "$BASELINE" ] || { echo "devflow: no merge-base for branch scope" >&2; exit 1; }
+               ;;
+  *)           echo "devflow: unknown SCOPE_MODE '$SCOPE_MODE'" >&2; exit 1 ;;
+esac
+printf '%s\n' "$BASELINE" > "$RUN_DIR/baseline"
+```
+
 ### Step 3: Internal + External Review (parallel)
 
 Launch both reviews simultaneously — they are independent and can run in parallel.
 Synthesize findings after both complete. Two axes of diversity: **personas × tools**.
 
-**Internal review** (multi-persona, runs as background sub-agents):
+**Execution profile — bound reviewer.** Read the binding fresh from
+`$RUN_DIR/effective-roles.json` (never from a Step 1 shell variable):
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+PROFILE="$(cat "$RUN_DIR/profile-active" 2>/dev/null || echo off)"
+EFF="$RUN_DIR/effective-roles.json"
+REV_AGENT="$([ "$PROFILE" != off ] && [ -s "$EFF" ] && python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reviewer") or "")' "$EFF")"
+REV_LENS="$([ "$PROFILE" != off ] && [ -s "$EFF" ] && python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reviewer_lens") or "architect")' "$EFF")"
+```
+
+If `$REV_AGENT` is non-empty, skip the
+persona loop below and make exactly ONE call: `Agent(subagent_type=<$REV_AGENT>)`,
+lens = `$REV_LENS` (fallback `architect` — quote its description from
+`review-personas.md`). Brief: the lens, the full pinned scope (this reviewer still reads
+everything, not just the delta), the delta brief on re-review rounds, and
+`$RUN_DIR/<phase>-verify.txt` if a verifier hook already ran for this deliverable.
+`persona_tiers` is ignored on this path — say so in the report. Record the lens used in Step 6.
+
+**Pass budget.** Before EVERY reviewer call this step makes — each enabled persona (or the
+bound-reviewer call above) AND the external call (Step 4) — reserve a pass, close it once that
+call returns. Reserve/close (and `init`/`complete`) run **only** when `PROFILE = active`. Call
+ids are stable (`<phase>-<internal|external>-round<N>[-<persona>]`), never `date`;
+`$RUN_DIR/final-review-round` tracks the round number (defaults to 1, incremented only in the
+Iteration section when a new round starts). The deliverable id is computed once, right here, the
+first time this block executes — `$RUN_DIR/baseline` (Step 2) is already known, so this never
+runs before it:
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+PROFILE="$(cat "$RUN_DIR/profile-active" 2>/dev/null || echo off)"
+
+# Deliverable id: the ONE place it is computed for this review (R3, A3). The runner shares the
+# implement phase's id when devflow-run owns the pipeline and this review IS that changeset
+# (checks $RUN_DIR/impl-base AND $RUN_DIR/pipeline internally); otherwise it keys off this
+# review's own baseline (Step 2, persisted BEFORE any init/reserve below).
+DID_OUT="$(bash "$RUNNER" deliverable-id --phase review --baseline "$(cat "$RUN_DIR/baseline" 2>/dev/null)")"; DID_RC=$?
+if [ "$DID_RC" -eq 8 ]; then
+  # DECISION-deliverable-changed-stops: rc=8 means the runner refused to overwrite
+  # $RUN_DIR/deliverable (it still holds the OLD id/budget) — never reuse it, stop instead.
+  echo "devflow: $DID_OUT -> NEEDS_USER_DECISION: deliverable changed since the last review round" >&2
+  # STOP: write result.yaml per "Finalize" (Step 6) with status NEEDS_USER_DECISION, then exit.
+  exit 1
+fi
+DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
+
+if [ "$PROFILE" = active ] && [ ! -s "$RUN_DIR/passes-$DELIVERABLE.max" ]; then
+  bash "$RUNNER" passes init --deliverable "$DELIVERABLE" --max "$(cat "$RUN_DIR/max-passes" 2>/dev/null || echo 0)" \
+    || { echo "devflow: passes init failed for $DELIVERABLE -> NEEDS_USER_DECISION" >&2; exit 1; }
+fi
+
+ROUND="$(cat "$RUN_DIR/final-review-round" 2>/dev/null)"; [ -n "$ROUND" ] || { ROUND=1; echo 1 > "$RUN_DIR/final-review-round"; }
+CALL_ID="final-review-internal-round${ROUND}-${PERSONA:-bound}"   # unique per call
+if [ "$PROFILE" = active ]; then
+  RES="$(bash "$RUNNER" passes reserve --deliverable "$DELIVERABLE" --call-id "$CALL_ID")"; RRC=$?
+  case "$RRC" in
+    0)
+      # ... make the call ...
+      bash "$RUNNER" passes close --deliverable "$DELIVERABLE" --call-id "$CALL_ID"
+      ;;
+    3) echo exhausted > "$RUN_DIR/final-review-reserve.state" ;;   # exhaustion rule runs in the next step, never a phase verdict here
+    9) : ;;   # CALL_ALREADY_CLOSED — this call was already made and closed; do not re-dispatch, reuse its recorded verdict
+    *) echo "failed:$RRC" > "$RUN_DIR/final-review-reserve.state"
+       echo "devflow: passes reserve failed ($RRC): $RES -> FAILED" >&2 ;;
+  esac
+else
+  : # ... make the call ... (unbound path: no budget tracking, one round still costs a pass conceptually — see "Unbound-path cost")
+fi
+```
+
+If reserve wrote `exhausted` to `final-review-reserve.state` (reserve returned rc 3): wait for any reviews
+already dispatched this round, then — if any finding from the last round is still
+open, stop as `NEEDS_USER_DECISION` — "review budget exhausted; further review only with new
+execution evidence"; if nothing is open, skip the remaining reviewer calls this round and go
+straight to the verifier hook / Step 5 (Synthesize) on what you already have. Any reserve exit
+other than 0, 3, or 9 is `FAILED` — quote the runner's line, never relabel it as exhaustion.
+
+**Internal review** (multi-persona, runs as background sub-agents — unbound path only, see above):
 1. Read persona definitions from the plugin's `skills/devflow-review/references/review-personas.md` (resolve from `$RUNNER`: `PERSONAS_REF="$(cd "$(dirname "$RUNNER")/.." && pwd)/skills/devflow-review/references/review-personas.md"`)
 2. Read `review_personas.personas` and `review_personas.persona_tiers` from config
 3. For each enabled persona, use the Agent tool to spawn a background sub-agent. Pass it:
@@ -246,7 +403,7 @@ else
   # a different changeset while the new pin describes this one.
   rm -f "$RUN_DIR/final-review-delta.txt" "$RUN_DIR/final-review.tree" \
         "$RUN_DIR/final-review.tree.pending" "$RUN_DIR/final-review.session" \
-        "$RUN_DIR/final-review-verdict.txt"
+        "$RUN_DIR/final-review-verdict.txt" "$RUN_DIR/final-review-round"
 fi
 
 # DELTA brief: on a re-review round, write what you changed, which finding ID each edit
@@ -262,10 +419,34 @@ printf '%s\n\n%s\n\n%s\n' "$REVIEW_PROMPT" "$(cat "$RUN_DIR/final-review-scope.t
 # `freshness-check` in cross-tool-runner.md). Step 5 re-checks it before any APPROVED, so the
 # orchestrator can reclassify someone else's fresh reading but never certify unread code.
 RESUME_ID="$(cat "$RUN_DIR/final-review.session" 2>/dev/null)"   # empty on the first iteration
-bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
-  --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt" \
-  --resume "$RESUME_ID" --freshness \
-  || { echo "devflow: no usable review -> NEEDS_USER_DECISION, not a verdict" >&2; exit 1; }
+# Recorded snapshot (A7): the digest the reviewer is about to read, written BEFORE the call so
+# Finalize (Step 6) reads it back instead of recomputing scope_digest at the end.
+bash "$RUNNER" scope-digest --base "${BASELINE:-}" > "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null
+# Pass budget: this external call is one reviewer pass, same DELIVERABLE as the internal path
+# above (Step 3's "Pass budget"), read from the file Step 3 wrote — never recomputed by hand.
+DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
+ROUND="$(cat "$RUN_DIR/final-review-round" 2>/dev/null)"; [ -n "$ROUND" ] || { ROUND=1; echo 1 > "$RUN_DIR/final-review-round"; }
+CALL_ID="final-review-external-round${ROUND}"
+PROFILE="$(cat "$RUN_DIR/profile-active" 2>/dev/null || echo off)"
+DISPATCH=1
+if [ "$PROFILE" = active ]; then
+  RES="$(bash "$RUNNER" passes reserve --deliverable "$DELIVERABLE" --call-id "$CALL_ID")"; RRC=$?
+  case "$RRC" in
+    0) : ;;
+    3) echo exhausted > "$RUN_DIR/final-review-reserve.state"; exit 0 ;;   # exhaustion rule runs in Step 5, never a phase verdict here
+    9) DISPATCH=0 ;;   # CALL_ALREADY_CLOSED — do not re-dispatch, reuse its recorded verdict
+    *) echo "failed:$RRC" > "$RUN_DIR/final-review-reserve.state"
+       echo "devflow: passes reserve failed ($RRC): $RES -> FAILED" >&2; exit 1 ;;
+  esac
+fi
+if [ "$DISPATCH" = 1 ]; then
+  bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
+    --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt" \
+    --resume "$RESUME_ID" --freshness
+  RC=$?
+  [ "$PROFILE" = active ] && bash "$RUNNER" passes close --deliverable "$DELIVERABLE" --call-id "$CALL_ID"
+  [ "$RC" -eq 0 ] || { echo "devflow: no usable review -> FAILED, not a verdict" >&2; exit 1; }
+fi
 ```
 
 - **Scope** — built inline from `SCOPE_MODE` (Step 2 table: uncommitted / staged / pr /
@@ -316,6 +497,19 @@ could not be read; 2 = no external call ever completed for this phase). From
 If it says the tree moved, say so in the report — the reader deserves to know the external
 findings describe an older tree.
 
+Once the review gate concludes here with nothing left blocking, run `passes complete` (only
+when the profile is active — same gate as Step 3's "Pass budget") before Step 6:
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+PROFILE="$(cat "$RUN_DIR/profile-active" 2>/dev/null || echo off)"
+DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
+SCOPE_BASE="$(cat "$RUN_DIR/baseline" 2>/dev/null)"
+if [ "$PROFILE" = active ]; then
+  bash "$RUNNER" passes complete --deliverable "$DELIVERABLE" --scope "$(bash "$RUNNER" scope-digest --base "$SCOPE_BASE")" --verdict clean
+fi
+```
+
 ### Step 6: Report
 
 Present findings to user and save report:
@@ -327,8 +521,8 @@ Present findings to user and save report:
 **Internal reviewer**: <current tool>
 **External reviewer**: <tool name>
 **Result**: your verdict in your own words — what you fixed, what you skipped, what needs the user
-**Rounds**: <count — your own recollection; devflow keeps no round counter on disk, so say
-so if a long run makes the number unreliable>
+**Rounds**: <count — your own recollection; `final-review-round` tracks call ids, not a report
+count>
 **Blocking**: <N resolved> / <N open>
 
 ## Summary
@@ -363,6 +557,49 @@ Your call, in one line, with the reasoning: ready as-is / ready with the notes a
 needs a decision from the user (say which finding and why).
 ```
 
+**Result contract (Finalize, always).** This is the single Finalize block every stop in this
+skill refers to (preflight failure in Step 1, passes-init failure in Step 3,
+budget-exhausted-with-blockers in Step 3, no-usable-review in Step 4, an Iteration round
+producing new blockers, and the success path). Write `$RUN_DIR/result.yaml` atomically via
+`result-write` and print the same block as the **last thing** in the final message — profile or
+not. Echo any `fallbacks[]` from `effective-roles.json` into the report first.
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+DELIVERABLE="$(cat "$RUN_DIR/deliverable" 2>/dev/null)"
+MAX_PASSES="$(cat "$RUN_DIR/max-passes" 2>/dev/null || echo 0)"
+ST="$(bash "$RUNNER" passes status --deliverable "$DELIVERABLE" 2>/dev/null)"
+USED="$(printf '%s\n' "$ST" | sed -n 's/^used=\([0-9]*\).*/\1/p')"
+# scope_digest comes from `passes status`'s recorded completion (A10); only recompute directly
+# when nothing has completed yet (profile off, or no round finished).
+SCOPE_DIGEST="$(printf '%s\n' "$ST" | sed -n 's/.*scope=\([^ ]*\).*/\1/p')"
+[ -n "$SCOPE_DIGEST" ] && [ "$SCOPE_DIGEST" != "-" ] || SCOPE_DIGEST="$(bash "$RUNNER" scope-digest --base "$(cat "$RUN_DIR/baseline" 2>/dev/null)" 2>/dev/null)"
+REVISION_REVIEWED="$(cat "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null)"
+```
+
+```yaml
+result_contract: 1
+status: DONE   # or NEEDS_USER_DECISION / FAILED
+deliverable: <DELIVERABLE, e.g. impl-<sha> or review-<baseline>>
+scope_digest: <SCOPE_DIGEST>
+revision_reviewed: <REVISION_REVIEWED — the digest recorded (Step 4) before the last reviewer call actually read>
+revision_final: <git rev-parse HEAD after the last fix wave, or same as reviewed if none>
+passes: { used: <USED, 0 if profile inactive>, max: <MAX_PASSES> }
+evidence:
+  - { kind: verifier, ref: <RUN_DIR>/final-verify.txt, ref_type: path, summary: <one line> }   # only if a verifier ran
+  - { kind: external_review, ref: <RUN_DIR>/final-review-verdict.txt, ref_type: path, summary: <one line> }
+blockers: []   # or [{id: <finding id>, summary: <one line>}, ...] when status is NEEDS_USER_DECISION
+artifacts_dir: <RUN_DIR>
+```
+
+Write it atomically — never a bare redirect (A6):
+
+```bash
+printf '%s' "$BLOCK" | bash "$RUNNER" result-write --path "$RUN_DIR/result.yaml"
+```
+
+(`$BLOCK` is the YAML above with the placeholders filled in from the variables computed just before it.)
+
 Create the output directory and save:
 
 ```bash
@@ -379,11 +616,15 @@ One round = fix the findings you decided to fix → re-review → decide again.
 2. **Write the delta brief** — naming each edit, its finding ID, **and re-listing every finding
    still open with its ID**. Personas are new sub-agents every round with no memory of the last
    one; without that list a recurring finding comes back under a new ID and looks like progress.
-3. **Re-review the whole board.** Set `CONTINUE=1` so Step 4 keeps the pinned scope, then
+3. **Re-review the whole board.** Bump the round counter (`echo $(( $(cat
+   "$RUN_DIR/final-review-round" 2>/dev/null || echo 1) + 1 )) > "$RUN_DIR/final-review-round"`),
+   set `CONTINUE=1` so Step 4 keeps the pinned scope, then
    re-spawn **all** personas (Step 3) *and* re-run the external call if one is configured, both
    carrying the delta brief. Not just the reviewer that complained — a fix is new code and can
    carry new defects.
-4. **Decide again** (Step 5), and stop when nothing is left that you consider worth fixing.
+4. **Decide again** (Step 5), and stop when nothing is left that you consider worth fixing. When
+   you stop with blockers still open instead, call `passes complete --verdict blockers` (Step 5's
+   gate) before Finalize.
 
 No round cap. What stops a run is lack of progress, not a number: if a round's fixes produce
 new findings instead of closing old ones, or the changeset keeps growing while the findings do
@@ -404,7 +645,18 @@ runtime — a tool/function description a model reads, a public API contract, an
 rely on — which is code-adjacent, in scope, and blocks like code. See "Prose is a one-pass
 concern, not a loop" in `review-personas.md`.
 
-**Implementation handoff**: If fixes are complex, resume the review session with
+**Execution profile — bound implementer + verifier.** Read `IMPL_AGENT`/`VER_AGENT` fresh from
+`$RUN_DIR/effective-roles.json`. If `IMPL_AGENT` is set,
+step 1 of each round ("Fix what you called blocking") is a write route: dispatch it via
+`Agent(subagent_type=<IMPL_AGENT>)` — goal = the open finding IDs, constraints (no
+commit/stage/push, only the findings' files), done-criteria (each finding's smallest fix),
+output format (delta brief text). After the fix — bound or not — if `VER_AGENT` is
+set, call `Agent(subagent_type=<VER_AGENT>)`: run tests/lint, diff vs the findings
+line by line, report commands + exit codes + `git rev-parse HEAD`; save to
+`$RUN_DIR/final-verify.txt` and attach it to the next review round's brief. The verifier call
+is not a review pass.
+
+**Implementation handoff** (unbound path only): If fixes are complex, resume the review session with
 **implementer** settings:
 
 ```bash

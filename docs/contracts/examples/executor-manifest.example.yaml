@@ -1,0 +1,10 @@
+executor_manifest: 1
+producer: claude-orchestrator          # informational
+host: claude                           # host whose agent names are used below
+roles:
+  implementer: { agent: implementer }
+  reviewer:    { agent: reviewer, lens: architect }
+  verifier:    { agent: verifier }
+budgets:
+  review_passes: 2                     # per deliverable; 0 = unlimited
+  fallback_to_host: false
