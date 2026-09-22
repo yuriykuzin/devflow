@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# devflow:run Step 0's re-entry gate (WIN-188 follow-up + fix wave F1/F2/F3/F4/F5): a context
+# devflow:run Step 0's re-entry gate (fix wave F1/F2/F3/F4/F5): a context
 # compaction re-entering Step 0 mid-run must not wipe RUN_DIR when an execution profile is
 # bound — `dir --fresh` stays byte-for-byte the same unconditional wipe it always was (see
 # 60-passes.sh:101-104); what changed is only WHETHER Step 0 calls it. There is no executable to
@@ -251,23 +251,23 @@ is "$(cat "$RUN_DIR/impl-base")" "deadbeef" "...theta's impl-base file is untouc
 
 # ── (H) F3: once plan-path exists, a re-typed/reworded description resumes rather than refuses
 ( cd "$REPO_FX" && bash "$RUNNER" dir --fresh ) >/dev/null
-step0 1 "WIN-188: add ElevenLabs voiceover to the course player" >/dev/null 2>&1
+step0 1 "add widget support to the dashboard" >/dev/null 2>&1
 p init --deliverable d9 --max 2 >/dev/null
 p reserve --deliverable d9 --call-id c1 >/dev/null
-printf 'docs/devflow/reports/2026-09-21-voiceover.md\n' > "$RUN_DIR/plan-path"
+printf 'docs/devflow/reports/2026-09-21-widget.md\n' > "$RUN_DIR/plan-path"
 
-outH="$(step0 1 "add voiceover to the course player" 2>&1)"; rcH=$?
+outH="$(step0 1 "add widget to the dashboard" 2>&1)"; rcH=$?
 is "$rcH" "0" "F3: a reworded re-typed description resumes once plan-path exists (not refused)"
 stH="$(p status --deliverable d9)"
 is "$stH" "used=1 max=2 open=c1 done=no scope=-" "...and the established run's pass budget survives the reword"
 
 # ── (I) F4: two descriptions sharing a 40-char prefix get DIFFERENT keys (no plan yet) ───────
 ( cd "$REPO_FX" && bash "$RUNNER" dir --fresh ) >/dev/null
-step0 1 "add voiceover support to the course player, phase 1" >/dev/null 2>&1
+step0 1 "add widget support to the dashboard, phase 1" >/dev/null 2>&1
 p init --deliverable d10 --max 1 >/dev/null
 sentinel_i="$(cat "$RUN_DIR/feature-key")"
 
-outI="$(step0 1 "add voiceover support to the course player, phase 2" 2>&1)"; rcI=$?
+outI="$(step0 1 "add widget support to the dashboard, phase 2" 2>&1)"; rcI=$?
 is "$rcI" "1" "F4: same 40-char prefix, different description still refuses (distinct hash key)"
 is "$(cat "$RUN_DIR/feature-key")" "$sentinel_i" "...feature-key untouched (no silent inheritance of phase 1's state)"
 
