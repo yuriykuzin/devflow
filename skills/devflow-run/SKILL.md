@@ -101,18 +101,116 @@ digraph run {
 ```bash
 # <inline the $RUNNER locator snippet — see cross-tool-runner.md "Locate the runner">
 # (env does not survive between Bash calls, so every step re-runs this guarded locator.)
-# Fresh feature -> claim a clean run so no prior feature's session/plan files get resumed. This
-# is user-initiated start ONLY — never retry with --force on your own initiative; exit 9 means
-# another devflow call is live in this checkout (A3), and only the user can say wipe it anyway.
-OUT="$(bash "$RUNNER" dir --fresh)"; DC=$?
-if [ "$DC" -eq 9 ]; then
-  echo "devflow: another devflow run is active in this checkout ($OUT) — RUN_ACTIVE. Stop, or re-run with --force only if the user explicitly asks to wipe it." >&2
+# Default path (HEAD behaviour): a fresh feature claims a clean run so no prior feature's
+# session/plan files get resumed. A bound execution profile is resume-safe instead: wiping
+# mid-flight — e.g. on a context-compaction re-entry into this very Step 0 — would delete this
+# run's own passes-<deliverable>.* budget state, plan-path, impl-base, deliverable and
+# <phase>.session/<phase>.tree files, all load-bearing for resume. Decide which policy applies
+# by resolving config now — cheap and idempotent; the "Execution profile" block below resolves
+# it again regardless. Mirrors devflow-plan's Step 1 gate — same pattern, not a new one.
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+CFGC="$(dirname "$RUNNER")/devflow-config.py"
+# F1: capture the resolve's own rc — a truncated/unreadable resolved-config.json must NOT be
+# read as "no profile" and fall through to the wipe below. Stderr is left flowing to the real
+# stderr (not swallowed) so the user sees why. Same stop the "Execution profile" block's own
+# rc==6 case takes further down — this is that same failure, caught before it can do damage.
+python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RESOLVE_RC=$?
+if [ "$RESOLVE_RC" -ne 0 ]; then
+  echo "devflow: could not resolve config at Step 0 (rc=$RESOLVE_RC) -> NEEDS_USER_DECISION. Nothing was wiped; see the resolver's error above." >&2
   exit 1
 fi
-RUN_DIR="$(printf '%s\n' "$OUT" | sed -n 's/^RUN_DIR=//p')"
+PROFILE_ACTIVE=0
+python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+roles = d.get("roles") if isinstance(d.get("roles"), dict) else {}
+bound = any(isinstance(r, dict) and r.get("agent") for r in roles.values())
+rev = d.get("review") if isinstance(d.get("review"), dict) else {}
+mp = rev.get("max_passes", 0)
+sys.exit(0 if (bound or (isinstance(mp, int) and not isinstance(mp, bool) and mp > 0)) else 1)
+' "$RUN_DIR/resolved-config.json" 2>/dev/null && PROFILE_ACTIVE=1
+
+if [ "$PROFILE_ACTIVE" = 1 ]; then
+  # F5: plain `dir` (below) never reads .active-<pid>, so without this the resume-safe branch had
+  # NO concurrency stop at all. Additive-only — never wipes — and stops exactly like the unbound
+  # branch's own RUN_ACTIVE check does.
+  ACTIVE_OUT="$(bash "$RUNNER" dir --check-active)"; ACTIVE_RC=$?
+  if [ "$ACTIVE_RC" -eq 9 ]; then
+    echo "devflow: another devflow run is active in this checkout ($ACTIVE_OUT) — RUN_ACTIVE. Stop, or re-run with --force only if the user explicitly asks to wipe it." >&2
+    exit 1
+  fi
+  # feature-key is a DETECTOR, not a separator: RUN_DIR is shared per checkout (A3), so it cannot
+  # isolate two features. It only exists to catch this resume-safe branch resuming the WRONG
+  # feature's state.
+  #
+  # DECISION-key-source (see ~/.claude/ledger/devflow/devflow-run-reentry.md): prefer persisted
+  # state over retyped prose. FEATURE_DESCRIPTION is never assigned by any script — it is
+  # retyped by the model from a (possibly compacted) context on every re-entry, so two entries
+  # for the same feature are not guaranteed to produce the same text (F3), and a 40-char prefix
+  # collides across genuinely different features (F4).
+  #
+  # The bypass below requires BOTH `plan-path` AND `feature-key` — not `plan-path` alone.
+  # `plan-path` alone survives a run that already reached a terminal exit (Finalize/error clears
+  # `feature-key` but deliberately leaves `plan-path`/`impl-base` alone, DECISION-impl-base-cleanup):
+  # every completed run has a `plan-path`, so bypassing on it alone would make the NEXT, entirely
+  # unrelated feature silently resume the finished run's plan/impl-base/passes-* the moment it
+  # enters Step 0, before Phase 1 ever gets a chance to mint its own plan — the exact silent
+  # wrong-resume F4 exists to prevent, walking back in through the plan-path shortcut. `feature-key`
+  # surviving alongside `plan-path` is what actually distinguishes "still mid-flight" (a
+  # compaction re-entry never clears it) from "already finished" (Finalize cleared it) — so only
+  # THAT combination may skip the identity check.
+  FK="$RUN_DIR/feature-key"
+  if [ -s "$RUN_DIR/plan-path" ] && [ -s "$FK" ]; then
+    # Established run, still mid-flight (feature-key survived): do NOT consult
+    # FEATURE_DESCRIPTION at all. The 24h staleness check still applies.
+    HELD_EPOCH="$(sed -n '2p' "$FK")"
+    AGE=$(( $(date +%s) - ${HELD_EPOCH:-0} ))
+    if [ "$AGE" -gt 86400 ]; then
+      HELD_READABLE="$(sed -n '3p' "$FK")"
+      echo "devflow: RUN_DIR is held by another run (feature=${HELD_READABLE:-?}, started epoch $HELD_EPOCH) — refusing to silently resume or wipe it. If that run is abandoned, re-run with: bash \"$RUNNER\" dir --fresh" >&2
+      exit 1
+    fi
+  else
+    # Either no plan yet, or a plan exists but feature-key doesn't (the previous run using this
+    # RUN_DIR already reached a terminal exit — see the bypass condition above): either way this
+    # is effectively a first entry, so the feature description IS the key. A re-typed 40-char
+    # slug is not collision-safe (F3/F4) — key on a hash of the FULL text instead. The readable
+    # prefix is kept only for the refusal message; the comparison below is over the hash. A
+    # stale FK here (plan-path present, feature-key absent) has nothing to compare against, so
+    # this always falls through to writing a fresh one for the new feature below.
+    [ -n "${FEATURE_DESCRIPTION:-}" ] || { echo "devflow: no feature description given and no plan-path recorded yet — cannot establish or resume a run. Re-invoke with the feature description." >&2; exit 1; }
+    FEATURE_HASH="$(printf '%s' "$FEATURE_DESCRIPTION" | shasum -a 256 | cut -d' ' -f1 | cut -c1-16)"
+    FEATURE_READABLE="$(printf '%s' "$FEATURE_DESCRIPTION" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-40)"
+    FEATURE_READABLE="${FEATURE_READABLE:-feature}"
+    if [ -s "$FK" ]; then
+      HELD_HASH="$(sed -n '1p' "$FK")"
+      HELD_EPOCH="$(sed -n '2p' "$FK")"
+      HELD_READABLE="$(sed -n '3p' "$FK")"
+      AGE=$(( $(date +%s) - ${HELD_EPOCH:-0} ))
+      if [ "$HELD_HASH" != "$FEATURE_HASH" ] || [ "$AGE" -gt 86400 ]; then
+        echo "devflow: RUN_DIR is held by another run (feature=${HELD_READABLE:-?}, started epoch $HELD_EPOCH) — refusing to silently resume or wipe it. If that run is abandoned, re-run with: bash \"$RUNNER\" dir --fresh" >&2
+        exit 1
+      fi
+    else
+      printf '%s\n%s\n%s\n' "$FEATURE_HASH" "$(date +%s)" "$FEATURE_READABLE" > "$FK"
+    fi
+  fi
+else
+  # No execution profile: restore HEAD's behaviour exactly — a fresh feature claims a clean
+  # run so no prior feature's session files get resumed. This is user-initiated start ONLY —
+  # never retry with --force on your own initiative; exit 9 means another devflow call is live
+  # in this checkout (A3), and only the user can say wipe it anyway.
+  OUT="$(bash "$RUNNER" dir --fresh)"; DC=$?
+  if [ "$DC" -eq 9 ]; then
+    echo "devflow: another devflow run is active in this checkout ($OUT) — RUN_ACTIVE. Stop, or re-run with --force only if the user explicitly asks to wipe it." >&2
+    exit 1
+  fi
+  RUN_DIR="$(printf '%s\n' "$OUT" | sed -n 's/^RUN_DIR=//p')"
+fi
 # devflow-run owns the pipeline: mark it so `deliverable-id --phase review` (Phase 3) knows this
 # review IS the same changeset implement just reviewed, without re-deriving that from impl-base
-# alone. Removed at Step 4 (Final Report) once the run is done.
+# alone. Removed at Step 4 (Final Report) once the run is done, and on every failure exit below
+# so a crash never leaks it into the next feature's run.
 : > "$RUN_DIR/pipeline"
 ```
 
@@ -120,15 +218,39 @@ RUN_DIR="$(printf '%s\n' "$OUT" | sed -n 's/^RUN_DIR=//p')"
 never inside the repo), so every phase — even in a fresh Bash call with no inherited shell
 state — reconstructs the same `RUN_DIR` with a plain `bash "$RUNNER" dir` and shares its
 files: the plan path, the pre-implementation base, and each phase's review-session id.
-`dir --fresh` wipes any old run first so two same-day `devflow:run` features never collide
-on one plan file or resume each other's session. The wipe is UNCONDITIONAL — nothing checks
-whether another devflow call is still in flight in this checkout, and running it next to a live
-call deletes that call's session/verdict/freshness files silently. One pipeline per checkout at
-a time; parallel work goes in git worktrees. This is the only place in devflow that passes
-`--fresh` as its normal behaviour — Phase 1's `devflow:plan` also starts with `dir --fresh` on
-its own default (unbound) path, which is harmless here since nothing is created in between; a
-bound execution profile makes `devflow:plan` take its resume-safe plain-`dir` branch instead
-(see its own Step 1), so nothing here needs to special-case that.
+Without a bound execution profile, `dir --fresh` wipes any old run first so two same-day
+`devflow:run` features never collide on one plan file or resume each other's session. That
+wipe is UNCONDITIONAL — nothing checks whether another devflow call is still in flight in this
+checkout, and running it next to a live call deletes that call's session/verdict/freshness files
+silently. One pipeline per checkout at a time; parallel work goes in git worktrees. This is the
+only place in devflow that passes `--fresh` as its normal (unbound) behaviour — Phase 1's
+`devflow:plan` also starts with `dir --fresh` on its own default (unbound) path, which is
+harmless here since nothing is created in between; a bound execution profile makes
+`devflow:plan` take its resume-safe plain-`dir` branch instead (see its own Step 1), so nothing
+here needs to special-case that.
+
+A bound execution profile makes THIS skill's own Step 0 take the resume-safe plain-`dir` branch
+too, instead of `dir --fresh` — a context compaction that re-enters Step 0 mid-run resumes the
+same `RUN_DIR` rather than wiping the pass-budget state, plan path and session files a phase
+already wrote, and it now also runs `dir --check-active` first (F5), the same additive lease
+check `--fresh` uses, so a run-external call still in flight stops the re-entry instead of being
+silently overwritten. `feature-key` guards the resume-safe branch against resuming the wrong
+thing: it is NOT a second RUN_DIR-isolation mechanism (RUN_DIR still has exactly one owner per
+checkout, A3) — it only detects when the held run's feature or age doesn't match this call, and
+refuses instead of guessing. Only when BOTH `plan-path` AND `feature-key` exist is the run
+identified by its own persisted state, never by `FEATURE_DESCRIPTION` again (that text is
+retyped by the model on every re-entry and is not guaranteed stable — see `DECISION-key-source`
+in Step 0 above); `plan-path` alone is not enough, because it deliberately outlives a completed
+run (`DECISION-impl-base-cleanup`) while `feature-key` does not — so `plan-path` with no
+`feature-key` means the previous run already finished, and Step 0 re-derives a fresh key from
+`FEATURE_DESCRIPTION` for what is a new feature, exactly as it would with no plan-path at all.
+Otherwise the key is a hash of the full description, not a truncated slug, so two different
+features never collide on one 40-character prefix. `feature-key` is removed at every terminal
+exit (Finalize, and the `NEEDS_USER_DECISION`/`FAILED` stops below) alongside `pipeline`, so it
+never outlives
+its run and forces an unrelated next feature to `dir --fresh` by hand. The escape hatch is always
+the same: `bash "$RUNNER" dir --fresh` by hand, once the user confirms the held run is safe to
+discard.
 
 Read the devflow config (merge three layers, each overriding the next: `.devflow.yaml` →
 `~/.devflow/config.yaml` → plugin `config.default.yaml`)
@@ -159,6 +281,7 @@ python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RRC=
 if [ "$RRC" -eq 6 ]; then
   echo "devflow: invalid execution profile in resolved config -> NEEDS_USER_DECISION" >&2
   # STOP: write result.yaml per "Finalize" (Step 4) with status NEEDS_USER_DECISION, then exit.
+  rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"   # Step 0 already created these above; a crash here must not leak either into the next feature's run (F2)
   exit 1
 elif [ "$RRC" -ne 0 ]; then
   echo off > "$RUN_DIR/profile-active"
@@ -171,9 +294,11 @@ else
     0) : ;;
     6|4|5|7)
       echo "devflow: profile-init failed ($PI_RC) -> NEEDS_USER_DECISION: $(cat "$RUN_DIR/profile-init-out.txt")" >&2
+      rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"   # crash before Step 4 must not leak either into the next feature's run (F2)
       exit 1 ;;
     *)
       echo "devflow: profile-init failed ($PI_RC) -> FAILED: $(cat "$RUN_DIR/profile-init-out.txt")" >&2
+      rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"   # crash before Step 4 must not leak either into the next feature's run (F2)
       exit 1 ;;
   esac
 fi
@@ -341,8 +466,10 @@ skill refers to (preflight failure in Step 0, and each phase's own Finalize when
 before reaching here — `NEEDS_USER_DECISION` propagates up rather than being re-finalized).
 Write `$RUN_DIR/result.yaml` atomically via `result-write` and print the same block as the
 **last thing** in the final message — profile or not. Echo any `fallbacks[]` from
-`effective-roles.json` into the report first. Remove `$RUN_DIR/pipeline` here — the run owns it
-and it must not leak into the next feature's run:
+`effective-roles.json` into the report first. Remove `$RUN_DIR/pipeline` and `$RUN_DIR/feature-key`
+here — the run owns both and neither must leak into the next feature's run (F2: without this, a
+completed run's `feature-key` survives and either hard-refuses the very next feature in this
+checkout, or lets a same-feature re-run silently inherit an already-exhausted pass budget):
 
 ```bash
 RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
@@ -356,7 +483,7 @@ USED="$(printf '%s\n' "$ST" | sed -n 's/^used=\([0-9]*\).*/\1/p')"
 SCOPE_DIGEST="$(printf '%s\n' "$ST" | sed -n 's/.*scope=\([^ ]*\).*/\1/p')"
 [ -n "$SCOPE_DIGEST" ] && [ "$SCOPE_DIGEST" != "-" ] || SCOPE_DIGEST="$(bash "$RUNNER" scope-digest --base "$IMPL_BASE" 2>/dev/null)"
 REVISION_REVIEWED="$(cat "$RUN_DIR/impl-reviewed.digest" 2>/dev/null)"
-rm -f "$RUN_DIR/pipeline"
+rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"
 ```
 
 ```yaml

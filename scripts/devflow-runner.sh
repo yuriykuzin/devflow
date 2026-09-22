@@ -111,30 +111,50 @@ devflow_gc_old_runs() {
 # session/output files out from under it, silently — one pipeline per checkout at a time was a
 # convention, not an enforced guarantee. (Parallel work still belongs in git worktrees — a
 # worktree has its own repo root, so its own RUN_DIR hash, and never contends on one lease.)
+#
+# Sweep $RUN_DIR/.active-<pid> leases: drop litter (non-pid-shaped names) and stale leases
+# (pid gone); if a LIVE lease is found, print "RUN_ACTIVE pid=<pid>" and return 9. Shared by
+# `dir --fresh` (destructive path, above) and `dir --check-active` (F5: devflow-run Step 0's
+# profile-active branch never calls `--fresh`, so without an additive check of its own it had NO
+# concurrency stop at all — a re-entry could truncate `pipeline` and drive phases concurrently
+# with an in-flight `run-external` holding the lease). This function never wipes anything.
+_devflow_active_lease_check() {
+  local lease pid
+  for lease in "$RUN_DIR"/.active-*; do
+    [ -e "$lease" ] || continue   # the glob itself when nothing matches (no nullglob in 3.2)
+    pid="${lease##*/.active-}"
+    case "$pid" in
+      ''|*[!0-9]*) rm -f "$lease" ;;                       # not a pid-shaped lease -> litter, drop it
+      *) if kill -0 "$pid" 2>/dev/null; then
+           echo "RUN_ACTIVE pid=$pid"
+           return 9
+         else
+           rm -f "$lease"                                 # stale: the pid it named is gone
+         fi ;;
+    esac
+  done
+  return 0
+}
 cmd_dir() {
-  local fresh=0 force=0
+  local fresh=0 force=0 check_active=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --fresh) fresh=1; shift ;;
       --force) force=1; shift ;;
+      --check-active) check_active=1; shift ;;
       *) echo "devflow: dir: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
+  if [ "$check_active" = "1" ]; then
+    # Additive-only: no wipe, no GC, no --fresh semantics — just the lease sweep above, so a
+    # caller can ask "is another run live?" without touching anything on a "no" answer.
+    _devflow_active_lease_check; local check_rc=$?
+    [ "$check_rc" -eq 0 ] || exit "$check_rc"
+    echo "RUN_DIR=$RUN_DIR"
+    exit 0
+  fi
   if [ "$fresh" = "1" ] && [ "$force" != "1" ]; then
-    local lease pid
-    for lease in "$RUN_DIR"/.active-*; do
-      [ -e "$lease" ] || continue   # the glob itself when nothing matches (no nullglob in 3.2)
-      pid="${lease##*/.active-}"
-      case "$pid" in
-        ''|*[!0-9]*) rm -f "$lease" ;;                       # not a pid-shaped lease -> litter, drop it
-        *) if kill -0 "$pid" 2>/dev/null; then
-             echo "RUN_ACTIVE pid=$pid"
-             exit 9
-           else
-             rm -f "$lease"                                 # stale: the pid it named is gone
-           fi ;;
-      esac
-    done
+    _devflow_active_lease_check || exit $?
   fi
   if [ "$fresh" = "1" ]; then
     # A failed rm must NOT fall through to a printed RUN_DIR as if the wipe succeeded (an
@@ -1395,7 +1415,7 @@ main() {
     result-write)     cmd_result_write "$@" ;;
     *)
       {
-        echo "usage: $(basename "$0") dir [--fresh] [--force] (--fresh exit 9 RUN_ACTIVE pid=<n> while a run is live; --force overrides)"
+        echo "usage: $(basename "$0") dir [--fresh] [--force] [--check-active] (--fresh exit 9 RUN_ACTIVE pid=<n> while a run is live; --force overrides; --check-active is the same lease check without wiping)"
         echo "       $(basename "$0") run-external --backend <codex|claude> --model <m> --effort <e> --phase <p> --prompt-file <f> [--role reviewer|implementer] [--resume <id>] [--no-session-reuse] [--freshness | --freshness-file <path>]"
         echo "       $(basename "$0") freshness-check --phase <p> [--file <path>] | scope-digest [--base <sha>]"
         echo "       $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> (exit 2 BUDGET_NOT_INITIALIZED, 3 BUDGET_EXHAUSTED, 9 CALL_ALREADY_CLOSED) | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>"
