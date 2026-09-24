@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "devflow",
+  "owner": {
+    "name": "Yuriy Kuzin"
+  },
+  "metadata": {
+    "description": "Cross-tool development workflow orchestrator: planning, implementation, and review across Claude Code, Codex, Cursor, and Gemini"
+  },
+  "plugins": [
+    {
+      "name": "devflow",
+      "source": "./",
+      "description": "Cross-tool development workflow orchestrator: planning, implementation, and review across Claude Code, Codex, Cursor, and Gemini"
+    }
+  ]
+}
