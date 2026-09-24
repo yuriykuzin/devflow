@@ -1,7 +1,7 @@
 {
   "name": "devflow",
   "description": "Cross-tool development workflow orchestrator: planning, implementation, and review across Claude Code, Codex, Cursor, and Gemini",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Yuriy Kuzin"
   },

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-24
+
 ### Added
 
 - `roles`/`review` execution-profile config (`config.default.yaml`, `~/.devflow/config.yaml`):
@@ -93,3 +95,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Skills record it in `result.yaml` and pass it to `passes complete --scope`; `devflow-run`'s
   no-double-review check compares it against the digest already recorded in a deliverable's
   `.done` file.
+
+### Fixed
+
+- `devflow:run` Step 0 called `dir --fresh` unconditionally, wiping `RUN_DIR` (and the pass
+  ledger's anti-replay guard along with it) on every re-entry, including a post-compaction
+  resume — so every compaction re-paid every external review pass. Step 0 now takes a plain
+  `dir` (no wipe) when an execution profile is active, keyed against a `feature-key` file so a
+  resume cannot silently pick up an unrelated feature's state; the no-profile path is
+  unchanged. Adds `scripts/devflow-runner.sh dir --check-active`, a non-destructive lease
+  check, so the resume-safe path keeps the `RUN_ACTIVE` concurrency stop without wiping
+  anything.
+- `.claude-plugin/marketplace.json` was missing since the repo's first commit, so
+  `claude plugin marketplace update` / `update` / `install` all failed to resolve this plugin
+  against any marketplace — every fix pushed here was unreachable by any update path. Added.
