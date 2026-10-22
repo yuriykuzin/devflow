@@ -112,6 +112,17 @@ autonomy: attended
 output_dir: "docs/devflow/reports"
 
 # ──────────────────────────────────────────────────────────────
+# PRE-REVIEW CHECKS — tests / lint / build run before every review round
+# ──────────────────────────────────────────────────────────────
+# Empty list = discover from the project (test/run.sh, Makefile test/lint, package.json
+# lint/typecheck/build/test, rspec/rubocop, pytest); the discovered commands are recorded in
+# $RUN_DIR/checks.txt. A run cannot end DONE unless the checks passed on the last reviewed tree.
+# A project with genuinely no checks opts out explicitly: commands: ["true"].
+# A project .devflow.yaml may set this (discovery already runs repo code).
+checks:
+  commands: []
+
+# ──────────────────────────────────────────────────────────────
 # Multi-persona review
 #
 # Internal review (host agent) spawns persona sub-agents in

@@ -343,6 +343,14 @@ impl-base) via `deliverable-id` and calls `init` itself — see each skill's Ste
 
 **Output**: Code changes in working directory + review report
 
+When Phase 2 returns, record its review as the fallback gated phase (B3,
+DECISION-gate-phase-at-phase-2):
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+echo impl-review > "$RUN_DIR/gate-phase"
+```
+
 **In attended mode**: After implementation is approved, present summary:
 > "Phase 2 complete. Implementation reviewed and approved. N files changed. Proceed to final review?"
 
@@ -378,7 +386,14 @@ if [ "$PROFILE" = active ]; then
     SKIP_PHASE3=1
   fi
 fi
+# Phase 3 is going to run: Finalize gates on its review, not Phase 2's. With SKIP_PHASE3=1 nothing
+# changes (gate-phase stays impl-review). Kept in this block so SKIP_PHASE3 is in scope.
+[ "$SKIP_PHASE3" = 1 ] || echo final-review > "$RUN_DIR/gate-phase"
 ```
+
+A plan-only run never writes `gate-phase`: no code was produced, so Finalize skips the gate.
+Implement-only runs therefore gate on `impl-review` and can end `DONE`. (The default path,
+profile off, never sets `SKIP_PHASE3=1`, so a full run always ends on `final-review`.)
 
 If `SKIP_PHASE3=1`: reuse Phase 2's report; go straight to the final verifier (if a verifier is
 bound, per `effective-roles.json`) and Step 4's result contract — do not invoke `devflow:review`
@@ -453,14 +468,6 @@ Generate a comprehensive report summarizing the entire pipeline:
 - Commit when satisfied
 ```
 
-Create the output directory and save:
-
-```bash
-mkdir -p <output_dir>
-```
-
-Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
-
 **Result contract (Finalize, always).** This is the single Finalize block every stop in this
 skill refers to (preflight failure in Step 0, and each phase's own Finalize when a phase stops
 before reaching here — `NEEDS_USER_DECISION` propagates up rather than being re-finalized).
@@ -482,9 +489,29 @@ USED="$(printf '%s\n' "$ST" | sed -n 's/^used=\([0-9]*\).*/\1/p')"
 # when nothing has completed yet (profile off, or no round finished).
 SCOPE_DIGEST="$(printf '%s\n' "$ST" | sed -n 's/.*scope=\([^ ]*\).*/\1/p')"
 [ -n "$SCOPE_DIGEST" ] && [ "$SCOPE_DIGEST" != "-" ] || SCOPE_DIGEST="$(bash "$RUNNER" scope-digest --base "$IMPL_BASE" 2>/dev/null)"
-REVISION_REVIEWED="$(cat "$RUN_DIR/impl-reviewed.digest" 2>/dev/null)"
-rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"
+GATE_PHASE="$(cat "$RUN_DIR/gate-phase" 2>/dev/null)"
+GATE_OUT=""; GATE_RC=0                      # no gate-phase (plan-only): nothing to review or check
+REVISION_REVIEWED=""
+if [ -n "$GATE_PHASE" ]; then
+  REVISION_REVIEWED="$(cat "$RUN_DIR/$GATE_PHASE-reviewed.digest" 2>/dev/null)"
+  [ -n "$REVISION_REVIEWED" ] || REVISION_REVIEWED="$(cat "$RUN_DIR/impl-review-reviewed.digest" 2>/dev/null)"   # gate's --fallback-phase
+  # DG-06: always the live gate on the current tree, with the same --phase/--fallback-phase as the phase used.
+  if [ "$GATE_PHASE" = impl-review ]; then GATE_BASE="$IMPL_BASE"; FB=""
+  else GATE_BASE="$(cat "$RUN_DIR/baseline" 2>/dev/null)"; FB="--fallback-phase impl-review"; fi
+  GATE_OUT="$(bash "$RUNNER" gate --phase "$GATE_PHASE" --base "$GATE_BASE" $FB)"; GATE_RC=$?
+  printf '%s\n' "$GATE_OUT"
+fi
+rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key" "$RUN_DIR/gate-phase"
 ```
+
+(If `REVISION_REVIEWED` is empty because Phase 3 never dispatched, fall back to
+`impl-review-reviewed.digest`, same as the gate's `--fallback-phase`.)
+
+**Status from the gate.** `DONE` only when `GATE_RC=0` and you have no open blocker. No
+gate-phase means no gate status. `GATE_RC=1`: the status is `NEEDS_USER_DECISION` (unless it is
+already `FAILED`). Add one blocker per `REASON=` line, as `{id: GATE-<reason>, summary: <one
+line>}`. `GATE_RC=4`: `FAILED`. Saving the report into `output_dir` cannot change the gate:
+snapshots exclude it (DECISION-snapshot-excludes-output-dir).
 
 ```yaml
 result_contract: 1
@@ -496,6 +523,7 @@ revision_final: <git rev-parse HEAD after the last fix wave>
 passes: { used: <USED, 0 if profile inactive>, max: <MAX_PASSES> }
 evidence:
   - { kind: verifier, ref: <RUN_DIR>/run-verify.txt, ref_type: path, summary: <one line> }
+  - { kind: tests, ref: <RUN_DIR>/checks.txt, ref_type: path, summary: <CHECKS=... from GATE_OUT, e.g. "CHECKS=pass (source=discovered, ran=2)"> }   # only if a gate ran
   - { kind: external_review, ref: <RUN_DIR>/final-review-verdict.txt or impl-review-verdict.txt, ref_type: path, summary: <one line> }
 blockers: []   # or [{id: <finding id>, summary: <one line>}, ...] when status is NEEDS_USER_DECISION
 artifacts_dir: <RUN_DIR>
@@ -508,6 +536,16 @@ printf '%s' "$BLOCK" | bash "$RUNNER" result-write --path "$RUN_DIR/result.yaml"
 ```
 
 (`$BLOCK` is the YAML above with the placeholders filled in from the variables computed just before it.)
+
+The report is saved after the gate ran (belt and braces: snapshots already exclude `output_dir`, DECISION-snapshot-excludes-output-dir).
+
+Create the output directory and save:
+
+```bash
+mkdir -p <output_dir>
+```
+
+Save to `<output_dir>/YYYY-MM-DD-<feature>-report.md`.
 
 ## Partial Execution Examples
 

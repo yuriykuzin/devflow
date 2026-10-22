@@ -152,6 +152,38 @@ esac
 printf '%s\n' "$BASELINE" > "$RUN_DIR/baseline"
 ```
 
+### Step 2b: Pre-review checks
+
+Run the project's tests / lint / build on the tree the reviewers are about to read, and finish
+them BEFORE dispatching any reviewer (DECISION-checks-before-dispatch). Commands come from
+`checks.commands`. An empty list means the runner discovers them, and `checks.txt` records which.
+Skip the re-run when the last result still describes this exact tree and base. On Claude Code,
+launch with `run_in_background: true` (checks can be long; one completion notification). Other
+hosts: a plain foreground call.
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+SCOPE_BASE="$(cat "$RUN_DIR/baseline" 2>/dev/null)"
+case "$(bash "$RUNNER" gate --phase final-review --base "$SCOPE_BASE")" in
+  *CHECKS=pass*|*CHECKS=fail*|*CHECKS=none*) echo "checks current for this tree — reusing $RUN_DIR/checks.txt" ;;
+  *) bash "$RUNNER" checks run --config "$RUN_DIR/resolved-config.json" --base "$SCOPE_BASE"
+     echo "checks exit=$?" ;;
+esac
+```
+
+- exit `0`: pass. Exit `1`: each failed command becomes a **blocking** finding `CHK-<n>`, cited
+  as `checks.txt` + the command. It is mechanically confirmed, so it is not sent to the finding
+  verifier.
+- exit `3`: no checks could run. Continue the review. Finalize cannot end `DONE`
+  (`GATE-checks-not-run`), and the report says so and suggests `checks.commands: ["true"]` if
+  the project genuinely has none.
+- exit `2` (`INVALID_CHECKS`) or `4` (`SNAPSHOT_FAILED`): `FAILED`. Quote the runner's line.
+- A `checks.txt` containing `### tree changed while checks ran` names the paths and suggests
+  `.gitignore` (N4): fix that (ignore the output, or revert the autofix), then re-run Step 2b.
+
+Every reviewer brief (each persona's prompt and the external prompt) carries the check
+outcome: the `checks.status` line plus the `### $` / `### exit=` lines of `checks.txt`.
+
 ### Step 3: Internal + External Review (parallel)
 
 Launch both reviews simultaneously — they are independent and can run in parallel.
@@ -214,6 +246,9 @@ if [ "$PROFILE" = active ]; then
   RES="$(bash "$RUNNER" passes reserve --deliverable "$DELIVERABLE" --call-id "$CALL_ID")"; RRC=$?
   case "$RRC" in
     0)
+      # Recorded snapshot: what THIS reviewer is about to read. Every dispatch overwrites it, so
+      # `gate` can tell whether anything changed after the LAST review (re-review-after-fix guard).
+      bash "$RUNNER" scope-digest --base "$(cat "$RUN_DIR/baseline" 2>/dev/null)" --tree-out "$RUN_DIR/final-review-reviewed.gittree" > "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null
       # ... make the call ...
       bash "$RUNNER" passes close --deliverable "$DELIVERABLE" --call-id "$CALL_ID"
       ;;
@@ -223,6 +258,7 @@ if [ "$PROFILE" = active ]; then
        echo "devflow: passes reserve failed ($RRC): $RES -> FAILED" >&2 ;;
   esac
 else
+  bash "$RUNNER" scope-digest --base "$(cat "$RUN_DIR/baseline" 2>/dev/null)" --tree-out "$RUN_DIR/final-review-reviewed.gittree" > "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null
   : # ... make the call ... (unbound path: no budget tracking, one round still costs a pass conceptually — see "Unbound-path cost")
 fi
 ```
@@ -230,8 +266,18 @@ fi
 If reserve wrote `exhausted` to `final-review-reserve.state` (reserve returned rc 3): wait for any reviews
 already dispatched this round, then — if any finding from the last round is still
 open, stop as `NEEDS_USER_DECISION` — "review budget exhausted; further review only with new
-execution evidence"; if nothing is open, skip the remaining reviewer calls this round and go
-straight to the verifier hook / Step 5 (Synthesize) on what you already have. Any reserve exit
+execution evidence"; if nothing is open, check that the last review still describes the tree:
+`bash "$RUNNER" gate --phase final-review --base "$(cat "$RUN_DIR/baseline")" $FB`, where
+`FB="--fallback-phase impl-review"` when `$RUN_DIR/pipeline` exists (devflow-run: implement may
+have spent the whole budget, so this phase has no review record of its own — B2) and empty
+otherwise. With `REVIEWED=fresh`, skip the remaining reviewer calls this round and go straight to the verifier
+hook / Step 5 (Synthesize) on what you already have. With `REVIEWED=stale` or `missing`, fixes
+exist that no reviewer has read. Do not stop yet: run the **confirmation pass** (Iteration,
+"Confirmation pass (budget spent)") — one diff-only review outside the budget, at most one per
+deliverable. Only if `passes reserve --confirm` refuses it (rc `3` `CONFIRM_ALREADY_USED`) stop
+as `NEEDS_USER_DECISION` — "review budget exhausted with unreviewed fixes" — with blocker
+`GATE-unreviewed-changes`. Never end `DONE` on code nobody reviewed. A finding you fixed in the
+last wave is "fixed, awaiting confirmation", not "open", for this rule. Any reserve exit
 other than 0, 3, or 9 is `FAILED` — quote the runner's line, never relabel it as exhaustion.
 
 **Internal review** (multi-persona, runs as background sub-agents — unbound path only, see above):
@@ -242,7 +288,7 @@ other than 0, 3, or 9 is `FAILED` — quote the runner's line, never relabel it 
    - The prose one-pass rule and its runtime-prose exception (review-personas.md, "Prose is a
      one-pass concern, not a loop") — so no persona loops on companion prose, and none waves
      through prose the code reads at runtime
-   - The review target scope (what git command to run, or what files to read)
+   - The review target scope (what git command to run, or what files to read). Append the same `CHECKS_BRIEF` text (built as in Step 4) after `{{REVIEW_TARGET}}`.
    - Model override matching the persona's tier (opus for deep, sonnet for standard)
    - For Claude: `deep` = opus/max, `standard` = sonnet/max
    - For Codex (if internal): all tiers = `high` (codex effort is not tiered; the deep/standard split only changes the claude backend's model)
@@ -412,16 +458,14 @@ fi
 # below then prints nothing, so it is spliced UNCONDITIONALLY. The block goes AFTER the
 # prompt body, so the reviewer reads what it is being asked to do before the record of edits.
 DELTA="$(cat "$RUN_DIR/final-review-delta.txt" 2>/dev/null)"
-printf '%s\n\n%s\n\n%s\n' "$REVIEW_PROMPT" "$(cat "$RUN_DIR/final-review-scope.txt")" "$DELTA" > "$RUN_DIR/final-review-prompt.txt"
+CHECKS_BRIEF="$(printf 'Pre-review checks (already run; do not re-run them):\n'; cat "$RUN_DIR/checks.status" 2>/dev/null; grep '^### ' "$RUN_DIR/checks.txt" 2>/dev/null)"
+printf '%s\n\n%s\n\n%s\n\n%s\n' "$REVIEW_PROMPT" "$(cat "$RUN_DIR/final-review-scope.txt")" "$CHECKS_BRIEF" "$DELTA" > "$RUN_DIR/final-review-prompt.txt"
 
 # Freshness invariant: `--freshness` makes the runner snapshot the tree the reviewer is about
 # to read and keep that snapshot ONLY if the call produced a real review (see
 # `freshness-check` in cross-tool-runner.md). Step 5 re-checks it before any APPROVED, so the
 # orchestrator can reclassify someone else's fresh reading but never certify unread code.
 RESUME_ID="$(cat "$RUN_DIR/final-review.session" 2>/dev/null)"   # empty on the first iteration
-# Recorded snapshot (A7): the digest the reviewer is about to read, written BEFORE the call so
-# Finalize (Step 6) reads it back instead of recomputing scope_digest at the end.
-bash "$RUNNER" scope-digest --base "${BASELINE:-}" > "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null
 # Pass budget: this external call is one reviewer pass, same DELIVERABLE as the internal path
 # above (Step 3's "Pass budget"), read from the file Step 3 wrote — never recomputed by hand.
 DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
@@ -440,6 +484,9 @@ if [ "$PROFILE" = active ]; then
   esac
 fi
 if [ "$DISPATCH" = 1 ]; then
+  # Recorded snapshot (A7), taken only when a call is really dispatched, against the persisted
+  # baseline (never ${BASELINE:-}: an unset var would silently diff against HEAD).
+  bash "$RUNNER" scope-digest --base "$(cat "$RUN_DIR/baseline" 2>/dev/null)" --tree-out "$RUN_DIR/final-review-reviewed.gittree" > "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null
   bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
     --phase final-review --prompt-file "$RUN_DIR/final-review-prompt.txt" \
     --resume "$RESUME_ID" --freshness
@@ -472,6 +519,14 @@ Combine internal (superpowers) and external review findings:
 2. **Cross-reference** — issue found by one but not other → verify manually
 3. **Filter false positives** — if you're confident an issue is wrong, explain why
 4. **Categorize** — group by file, blocking findings first
+5. **Verify findings** — before deciding, dispatch the finding verifier once for this round, per
+   `references/finding-verifier.md` (phase `final-review`, base `$(cat "$RUN_DIR/baseline")`).
+   It re-checks each finding in scope at its file:line and returns CONFIRMED / NOT_REPRODUCED
+   plus a label: Important / Nit / Pre-existing. Saved to `$RUN_DIR/final-review-findings-verified.txt`.
+   **Only a CONFIRMED + Important finding can block.** NOT_REPRODUCED, Nit (style-only) and
+   Pre-existing findings do not block. They still go to the "Not actioned" table with the
+   verifier's reason. You may overrule a verifier result only by citing your own file:line
+   evidence in the report.
 
 **You decide, not the reviewers' verdict token.** You have the internal personas' findings and,
 if an external backend is configured for this host, the external reviewer's. Read them and make
@@ -505,10 +560,15 @@ RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 PROFILE="$(cat "$RUN_DIR/profile-active" 2>/dev/null || echo off)"
 DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
 SCOPE_BASE="$(cat "$RUN_DIR/baseline" 2>/dev/null)"
-if [ "$PROFILE" = active ]; then
+FB=""; [ -f "$RUN_DIR/pipeline" ] && FB="--fallback-phase impl-review"   # B2
+GATE_OUT="$(bash "$RUNNER" gate --phase final-review --base "$SCOPE_BASE" $FB)"; GATE_RC=$?
+printf '%s\n' "$GATE_OUT"
+if [ "$GATE_RC" -eq 0 ] && [ "$PROFILE" = active ]; then
   bash "$RUNNER" passes complete --deliverable "$DELIVERABLE" --scope "$(bash "$RUNNER" scope-digest --base "$SCOPE_BASE")" --verdict clean
 fi
 ```
+
+`GATE_RC=1` means the review is not concluded. `unreviewed-changes` / `checks-stale` → run another round (Iteration). `checks-failed` → the `CHK-<n>` findings are open blockers. `checks-not-run` / `checks-missing` → Finalize as `NEEDS_USER_DECISION`. `GATE_RC=4` (snapshot failed) → `FAILED`. Never call `--verdict clean` on a blocked gate.
 
 ### Step 6: Report
 
@@ -544,9 +604,9 @@ Issues flagged by external reviewer that appear incorrect, with explanation.
 <MANDATORY. One row per finding the reviewers raised that did not become a fix.
 Never omit this section, and never leave a raw finding out of it.>
 
-| ID | Finding | Raised by | Blocks | Why not now | Suggested next step |
-|----|---------|-----------|--------|-------------|---------------------|
-| F-3 | ... | Architect, external | no | needs a new public contract; out of the pinned scope | separate ticket before the next release |
+| ID | Finding | Raised by | Blocks | Verifier | Why not now | Suggested next step |
+|----|---------|-----------|--------|----------|-------------|---------------------|
+| F-3 | ... | Architect, external | no | CONFIRMED / Pre-existing (same behaviour at base: `git show <base>:<file>` line 40; changeset does not reach it) | needs a new public contract; out of the pinned scope | separate ticket before the next release |
 
 State plainly which of these you consider worth doing later and which you consider
 wrong, and recommend the concrete next action for each (ticket, follow-up changeset,
@@ -575,7 +635,17 @@ USED="$(printf '%s\n' "$ST" | sed -n 's/^used=\([0-9]*\).*/\1/p')"
 SCOPE_DIGEST="$(printf '%s\n' "$ST" | sed -n 's/.*scope=\([^ ]*\).*/\1/p')"
 [ -n "$SCOPE_DIGEST" ] && [ "$SCOPE_DIGEST" != "-" ] || SCOPE_DIGEST="$(bash "$RUNNER" scope-digest --base "$(cat "$RUN_DIR/baseline" 2>/dev/null)" 2>/dev/null)"
 REVISION_REVIEWED="$(cat "$RUN_DIR/final-review-reviewed.digest" 2>/dev/null)"
+[ -n "$REVISION_REVIEWED" ] || REVISION_REVIEWED="$(cat "$RUN_DIR/impl-review-reviewed.digest" 2>/dev/null)"   # gate's --fallback-phase
+FB=""; [ -f "$RUN_DIR/pipeline" ] && FB="--fallback-phase impl-review"
+GATE_OUT="$(bash "$RUNNER" gate --phase final-review --base "$(cat "$RUN_DIR/baseline" 2>/dev/null)" $FB)"; GATE_RC=$?
+printf '%s\n' "$GATE_OUT"
 ```
+
+**Status from the gate.** `DONE` only when `GATE_RC=0` and you have no open blocker.
+`GATE_RC=1`: the status is `NEEDS_USER_DECISION` (unless it is already `FAILED`). Add one
+blocker per `REASON=` line, as `{id: GATE-<reason>, summary: <one line>}`. `GATE_RC=4`:
+`FAILED`. Saving the report into `output_dir` cannot change the gate: snapshots exclude it
+(DECISION-snapshot-excludes-output-dir).
 
 ```yaml
 result_contract: 1
@@ -587,6 +657,8 @@ revision_final: <git rev-parse HEAD after the last fix wave, or same as reviewed
 passes: { used: <USED, 0 if profile inactive>, max: <MAX_PASSES> }
 evidence:
   - { kind: verifier, ref: <RUN_DIR>/final-verify.txt, ref_type: path, summary: <one line> }   # only if a verifier ran
+  - { kind: tests, ref: <RUN_DIR>/checks.txt, ref_type: path, summary: <CHECKS=... from GATE_OUT, e.g. "CHECKS=pass (source=discovered, ran=2)"> }
+  - { kind: verifier, ref: <RUN_DIR>/final-review-findings-verified.txt, ref_type: path, summary: <N confirmed / M not reproduced> }   # only if the finding verifier ran
   - { kind: external_review, ref: <RUN_DIR>/final-review-verdict.txt, ref_type: path, summary: <one line> }
 blockers: []   # or [{id: <finding id>, summary: <one line>}, ...] when status is NEEDS_USER_DECISION
 artifacts_dir: <RUN_DIR>
@@ -613,18 +685,88 @@ Save to `<output_dir>/YYYY-MM-DD-<scope>-review.md`.
 One round = fix the findings you decided to fix → re-review → decide again.
 
 1. **Fix what you called blocking.** Findings you decided to skip are recorded, not fixed.
+   Fold any prose/wording fixes into this fix wave. Nothing is edited after the final round
+   (DECISION-post-review-edits).
 2. **Write the delta brief** — naming each edit, its finding ID, **and re-listing every finding
    still open with its ID**. Personas are new sub-agents every round with no memory of the last
    one; without that list a recurring finding comes back under a new ID and looks like progress.
 3. **Re-review the whole board.** Bump the round counter (`echo $(( $(cat
    "$RUN_DIR/final-review-round" 2>/dev/null || echo 1) + 1 )) > "$RUN_DIR/final-review-round"`),
-   set `CONTINUE=1` so Step 4 keeps the pinned scope, then
+   set `CONTINUE=1` so Step 4 keeps the pinned scope, then re-run Step 2b (the checks are stale
+   after any fix), then
    re-spawn **all** personas (Step 3) *and* re-run the external call if one is configured, both
    carrying the delta brief. Not just the reviewer that complained — a fix is new code and can
    carry new defects.
-4. **Decide again** (Step 5), and stop when nothing is left that you consider worth fixing. When
+4. **Decide again** (Step 5), and stop when nothing is left that you consider worth fixing **and**
+   Step 5's `gate` exits 0. When
    you stop with blockers still open instead, call `passes complete --verdict blockers` (Step 5's
    gate) before Finalize.
+
+**Confirmation pass (budget spent).** When `passes reserve` returns rc `3` while you have fixes
+no reviewer has read (`gate` says `REVIEWED=stale`), run ONE diff-only review outside the
+budget. It is capped at one per deliverable by the runner. Implement and run's final review share
+the deliverable, so they share this one confirm.
+
+```bash
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+PHASE=final-review; BASE="$(cat "$RUN_DIR/baseline" 2>/dev/null)"
+DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
+FB=""; [ -f "$RUN_DIR/pipeline" ] && FB=impl-review   # B2: implement may hold the only review record
+# FIRST, before reserve: freeze the diff base (written once, only if absent; DG-02/B4). A replay
+# after compaction reuses it.
+CB_OUT="$(bash "$RUNNER" confirm-base --phase "$PHASE" --deliverable "$DELIVERABLE" ${FB:+--fallback-phase "$FB"})" \
+  || { echo "devflow: no reviewed tree recorded -> NEEDS_USER_DECISION (GATE-unreviewed-changes)" >&2; exit 1; }
+CONFIRM_BASE="${CB_OUT#CONFIRM_BASE=}"
+RES="$(bash "$RUNNER" passes reserve --deliverable "$DELIVERABLE" --call-id "$PHASE-confirm" --confirm)"; RRC=$?
+case "$RRC" in
+  0) : ;;
+  9) echo "confirm already made and closed — reuse its recorded verdict"; exit 0 ;;
+  3|4) echo "devflow: $RES -> NEEDS_USER_DECISION (GATE-unreviewed-changes)" >&2; exit 1 ;;
+  *) echo "devflow: passes reserve --confirm failed ($RRC): $RES -> FAILED" >&2; exit 1 ;;
+esac
+# The dispatch record goes to .pending files, NOT the real reviewed.digest/.gittree: those are promoted only
+# after a usable review (below), so an interrupted confirm never reads as REVIEWED=fresh (DG-02). Then the
+# diff since the last reviewed state.
+bash "$RUNNER" scope-digest --base "$BASE" --tree-out "$RUN_DIR/$PHASE-reviewed.gittree.pending" > "$RUN_DIR/$PHASE-reviewed.digest.pending" 2>/dev/null
+NEW_TREE="$(cat "$RUN_DIR/$PHASE-reviewed.gittree.pending" 2>/dev/null)"
+[ -n "$NEW_TREE" ] || { echo "devflow: could not record the current tree -> NEEDS_USER_DECISION (GATE-unreviewed-changes)" >&2; exit 1; }
+git diff "$(cat "$CONFIRM_BASE")" "$NEW_TREE" > "$RUN_DIR/$PHASE-confirm-diff.txt"
+```
+
+The reviewer is the external one if configured for this host, else `Agent(subagent_type=<REV_AGENT>)`,
+else one persona, the one that raised the first fixed blocker. Its prompt has three parts: the
+confirm-diff, the delta brief (each fixed finding ID with its edit), and "Review ONLY this diff:
+does each fix close its finding, and does the diff introduce a new defect? APPROVED or
+CHANGES_REQUESTED." The external call passes the resolved reviewer flags exactly like Step 4's
+call (DG-03: without `--backend` the runner rejects it with exit 2), fresh session, no `--resume`,
+and promotes the pending record and closes the reservation ONLY when the call succeeded:
+
+```bash
+# <inline the $RUNNER locator snippet — see cross-tool-runner.md "Locate the runner">
+RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
+DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
+BACKEND=claude; MODEL=opus; EFFORT=max    # <- reviewer values from your merged config (Step 1); same as Step 4
+bash "$RUNNER" run-external --backend "$BACKEND" --model "$MODEL" --effort "$EFFORT" \
+  --phase final-review-confirm --prompt-file "$RUN_DIR/final-review-confirm-prompt.txt" --freshness
+RC=$?
+[ "$RC" -eq 0 ] || { echo "devflow: confirm review failed (rc $RC) -> FAILED; reservation left open, not closed as clean" >&2; exit 1; }
+mv -f "$RUN_DIR/final-review-reviewed.gittree.pending" "$RUN_DIR/final-review-reviewed.gittree" \
+  && mv -f "$RUN_DIR/final-review-reviewed.digest.pending" "$RUN_DIR/final-review-reviewed.digest" \
+  || { echo "devflow: cannot promote the confirm's reviewed record -> FAILED; reservation left open" >&2; exit 1; }
+bash "$RUNNER" passes close --deliverable "$DELIVERABLE" --call-id "final-review-confirm" \
+  || { echo "devflow: cannot close the confirm reservation -> FAILED" >&2; exit 1; }
+```
+
+An internal reviewer is the same, minus `run-external`: only once it returned a usable verdict run
+the promote (`mv`) and close lines above. With no usable verdict: `FAILED`, the pending record stays
+unpromoted and the call stays open (re-reserving the same open call id returns rc `0`, so a replay
+re-runs the block and may retry), never closed.
+
+- Clean (no new finding the finding verifier CONFIRMS as Important) → Step 5's gate now passes
+  → `passes complete --verdict clean` (check its exit code: it refuses while any call is still
+  open — non-zero is `FAILED`, quote its line) → `DONE`.
+- A new confirmed blocker, or any edit after the confirm → `NEEDS_USER_DECISION`, with the IDs
+  (or `GATE-unreviewed-changes`). There is no second confirm.
 
 No round cap. What stops a run is lack of progress, not a number: if a round's fixes produce
 new findings instead of closing old ones, or the changeset keeps growing while the findings do
@@ -637,7 +779,7 @@ structural fix, and it needs no bookkeeping to hold.
 
 **Prose is a one-pass concern, not a loop.** A plan narrative, design notes, PR/commit
 descriptions, and intent-only docstrings are checked once for factual accuracy and then fixed in a single
-final wording pass — a wrong or over-reaching claim in them is a non-blocking nit, never a round.
+wording pass folded into the last fix wave, so the final review round reads it. An edit after the final round, wording included, needs one more round (the `gate` refuses `DONE` on it). A wrong or over-reaching claim in them is a non-blocking nit, never a round.
 The failure mode this prevents: reviewers spin round after round "correcting" one unmeasured
 assertion into a different unmeasured one while the code has been correct since round one. The
 loop is for code and observable behavior. The one exception is prose the code depends on at
@@ -680,6 +822,8 @@ codex via `--full-auto` — while a reviewer call runs read-only).
 - **Pin the scope once** — a fix must never widen what the next round reviews
 - **Prose is reviewed once, code is looped** — plan narratives / design notes / PR descriptions / intent-only docstrings get a single accuracy pass; a wrong claim in them is a non-blocking nit, never a round. Exception: prose the code reads at runtime (tool/function descriptions, API contracts, stated invariants) blocks like code
 - **Every fix round re-runs every persona**, with a delta brief saying what changed and where to look
+- **DONE means reviewed and checked** — `gate` must exit 0: the last reviewer read the final tree, and the checks passed on it. A fix after the last review needs one more review; with the budget spent, that is the single diff-only confirmation pass (outside the budget), and only a refused or failed confirm ends `NEEDS_USER_DECISION`
+- **Verify before blocking** — a finding blocks only when the finding verifier CONFIRMED it as Important; everything else is reported, not fixed
 - **You decide, the reviewers advise** — read internal + external findings and choose per finding: fix now, or skip with a reason in the report
 - **Nothing is dropped silently** — every raw finding lands in the report with its blocking call, a reason, and a proposed next step
 - **Respect persona tiers** — `deep` personas (Security, Architect) get opus/max; `standard` get sonnet/max
