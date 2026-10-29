@@ -409,9 +409,10 @@ not a reviewer's raw verdict token. On open findings:
 - **attended**: Present to user for decision
 - **unattended**: the `devflow:review` skill's **Iteration** section owns the fix → re-review
   loop (each round re-runs every persona plus the external reviewer, if one is configured, with
-  a delta brief). No round cap; it stops as `NEEDS_USER_DECISION` when a round's fixes produce
-  new findings instead, or a fix would break the pinned scope. Do not restate or override
-  those rules here.
+  a delta brief). No round cap: once the budget is spent, each fix wave gets a diff-only
+  confirmation round outside the budget. It stops as `NEEDS_USER_DECISION` on `CONFIRM_STALLED`
+  (two consecutive rounds that did not reduce the open blockers), or when a fix would break the
+  pinned scope. Do not restate or override those rules here.
 
 **`NEEDS_USER_DECISION` propagates up.** It is neither approval nor failure: end the run,
 report it as the pipeline status with the exact finding IDs and the decision needed, and do

@@ -879,7 +879,8 @@ cmd_gate() {
 # not charge twice (compaction/resume replays the same id, never a fresh one).
 #
 # State: one file per deliverable, $RUN_DIR/passes-<deliverable>.tsv, one line per call —
-# "<call-id>\t<reserved-epoch>\t<closed-epoch|->" — plus:
+# "<call-id>\t<reserved-epoch>\t<closed-epoch|->" — a confirmation call adds three fields:
+# "\tconfirm\t<open-before>\t<open-after|->" (see the confirmation section below). Plus:
 #   passes-<deliverable>.max   the budget, written ONCE by `passes init` (fixed for the
 #                              deliverable's life; `dir --fresh` is the only reset). `reserve`
 #                              no longer takes --max — it reads this file, and refuses to run
@@ -910,8 +911,22 @@ _devflow_passes_has_id() {
 # `used` = reviewer passes charged to the budget. A confirmation pass (4th tsv field "confirm") is
 # recorded in the same ledger, so close/open/complete treat it like any call, but it is never
 # charged: DECISION-confirm-pass-outside-budget.
+#
+# Confirmation rounds (DECISION-confirm-rounds-no-progress): once the budget is spent, every fix
+# wave that changed the reviewed tree gets a diff-only confirm, however many times it is needed.
+# Progress is measured on the open blocker count: a round made progress when it left fewer open
+# blockers than it started with (open-before comes from `reserve --confirm --open`, open-after
+# from `close --open`). The run stops (CONFIRM_STALLED, exit 3) after CONFIRM_STALL_ROUNDS
+# consecutive confirm rounds without progress. A fix wave that changes nothing never reaches here:
+# the caller's gate still reads the tree as reviewed and the open blockers stop the run.
+CONFIRM_STALL_ROUNDS=2
 _devflow_passes_used()    { awk -F'\t' '$4!="confirm"{n++} END{print n+0}' "$1" 2>/dev/null || echo 0; }
-_devflow_passes_confirm() { awk -F'\t' '$4=="confirm"{print $1; exit}' "$1" 2>/dev/null; }
+_devflow_passes_confirm() { awk -F'\t' '$4=="confirm"{p=$1} END{print p}' "$1" 2>/dev/null; }
+_devflow_passes_confirm_stalled() {
+  # True when the last CONFIRM_STALL_ROUNDS closed confirm rounds all left open-after >= open-before.
+  awk -F'\t' -v k="$CONFIRM_STALL_ROUNDS" '$4=="confirm"{ n++; np[n] = ($6+0 >= $5+0) }
+    END { if (n < k) exit 1; for (i = n - k + 1; i <= n; i++) if (!np[i]) exit 1; exit 0 }' "$1" 2>/dev/null
+}
 
 _devflow_passes_lock() {
   local lockdir="$1" n=0
@@ -963,17 +978,23 @@ cmd_passes_init() {
 }
 
 cmd_passes_reserve() {
-  local deliv="" cid="" confirm=0
+  local deliv="" cid="" confirm=0 open_n=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --deliverable) _need_val "passes reserve" --deliverable "$#"; deliv="$2"; shift 2 ;;
       --call-id)     _need_val "passes reserve" --call-id "$#";     cid="$2";  shift 2 ;;
       --confirm)     confirm=1; shift ;;
+      --open)        _need_val "passes reserve" --open "$#";        open_n="$2"; shift 2 ;;
       *) echo "devflow: passes reserve: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
   _devflow_passes_validate_id "--deliverable" "$deliv"
   _devflow_passes_validate_id "--call-id" "$cid"
+  if [ "$confirm" = 1 ]; then
+    case "$open_n" in ''|*[!0-9]*) echo "devflow: passes reserve: --confirm requires --open <n> (blocking findings open before this fix wave)" >&2; exit 2 ;; esac
+  elif [ -n "$open_n" ]; then
+    echo "devflow: passes reserve: --open is only for --confirm" >&2; exit 2
+  fi
 
   local f mf lock
   f="$(_devflow_passes_file "$deliv")"; mf="$(_devflow_passes_max_file "$deliv")"; lock="$(_devflow_passes_lock_dir "$deliv")"
@@ -1009,18 +1030,23 @@ cmd_passes_reserve() {
   fi
 
   if [ "$confirm" = 1 ]; then
-    # One confirmation pass per deliverable, and only once the budget is really spent — never a
-    # free extra pass while budget remains (or when it is unlimited).
+    # Only once the budget is really spent — never a free extra pass while budget remains (or when
+    # it is unlimited). Not capped at one: the budget is for full reviews, and a fix wave that
+    # changed the tree is re-reviewed by a confirm round until the no-progress rule stops it.
     if [ "$max" = "0" ] || [ "$used" -lt "$max" ]; then
       _devflow_passes_unlock "$lock"; echo "CONFIRM_NOT_NEEDED used=$used max=$max"; exit 4
     fi
-    local prev; prev="$(_devflow_passes_confirm "$f")"
-    if [ -n "$prev" ]; then
-      _devflow_passes_unlock "$lock"; echo "CONFIRM_ALREADY_USED call-id=$prev"; exit 3
+    local open_cid; open_cid="$(awk -F'\t' -v c="$cid" '$4=="confirm" && $3=="-" && $1!=c{print $1; exit}' "$f" 2>/dev/null)"
+    if [ -n "$open_cid" ]; then
+      _devflow_passes_unlock "$lock"; echo "CONFIRM_STILL_OPEN call-id=$open_cid"; exit 3
     fi
-    printf '%s\t%s\t-\tconfirm\n' "$cid" "$(date +%s)" >> "$f"
+    if _devflow_passes_confirm_stalled "$f"; then
+      _devflow_passes_unlock "$lock"
+      echo "CONFIRM_STALLED rounds=$CONFIRM_STALL_ROUNDS no-progress: open blocking findings not reduced"; exit 3
+    fi
+    printf '%s\t%s\t-\tconfirm\t%s\t-\n' "$cid" "$(date +%s)" "$open_n" >> "$f"
     _devflow_passes_unlock "$lock"
-    echo "CONFIRM_RESERVED call-id=$cid"
+    echo "CONFIRM_RESERVED call-id=$cid open-before=$open_n"
     exit 0
   fi
 
@@ -1038,11 +1064,12 @@ cmd_passes_reserve() {
 }
 
 cmd_passes_close() {
-  local deliv="" cid=""
+  local deliv="" cid="" open_n=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --deliverable) _need_val "passes close" --deliverable "$#"; deliv="$2"; shift 2 ;;
       --call-id)     _need_val "passes close" --call-id "$#";     cid="$2";  shift 2 ;;
+      --open)        _need_val "passes close" --open "$#";        open_n="$2"; shift 2 ;;
       *) echo "devflow: passes close: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
@@ -1058,9 +1085,17 @@ cmd_passes_close() {
     echo "devflow: passes close: no reservation found for call-id '$cid' on deliverable '$deliv'" >&2
     exit 1
   fi
+  # A confirm round must say how many blocking findings are still open after it (progress signal);
+  # an ordinary call takes no --open.
+  local is_confirm; is_confirm="$(awk -F'\t' -v c="$cid" '$1==c{print ($4=="confirm" ? 1 : 0); exit}' "$f")"
+  if [ "$is_confirm" = 1 ]; then
+    case "$open_n" in ''|*[!0-9]*) _devflow_passes_unlock "$lock"; echo "devflow: passes close: confirmation call '$cid' requires --open <n>" >&2; exit 2 ;; esac
+  elif [ -n "$open_n" ]; then
+    _devflow_passes_unlock "$lock"; echo "devflow: passes close: --open is only for confirmation calls" >&2; exit 2
+  fi
   local tmp; tmp="${f}.tmp.$$"
-  awk -F'\t' -v OFS='\t' -v c="$cid" -v ts="$(date +%s)" '
-    $1==c && $3=="-" { $3=ts } { print }
+  awk -F'\t' -v OFS='\t' -v c="$cid" -v ts="$(date +%s)" -v o="$open_n" '
+    $1==c && $3=="-" { $3=ts; if ($4=="confirm") $6=o } { print }
   ' "$f" > "$tmp" && mv "$tmp" "$f"
   _devflow_passes_unlock "$lock"
   exit 0
@@ -1146,24 +1181,27 @@ cmd_passes() {
   esac
 }
 
-# Freezes the "last reviewed state" a confirmation pass diffs against. Written ONCE (only if
-# absent) BEFORE the confirm dispatch overwrites <phase>-reviewed.gittree: a replay after an
-# interruption must still see the pre-confirm state, never current-vs-current (an empty diff that
-# would approve unread fixes). Keyed by deliverable so a later deliverable never inherits it.
+# Freezes the "last reviewed state" a confirmation round diffs against. Written ONCE per confirm
+# call (only if absent) BEFORE the confirm dispatch overwrites <phase>-reviewed.gittree: a replay
+# of the same round after an interruption must still see the pre-round state, never
+# current-vs-current (an empty diff that would approve unread fixes). Keyed by deliverable and
+# call-id, so each round starts from the tree the previous round promoted (the diff is always
+# "since the last reviewed tree"), and a later deliverable never inherits it.
 # Prints CONFIRM_BASE=<path>. Exit 0 ok, 1 NO_REVIEWED_TREE (nothing to diff against), 2 usage.
 cmd_confirm_base() {
-  local ph="" del="" fb=""
+  local ph="" del="" fb="" cid=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --phase) _need_val confirm-base --phase "$#"; ph="$2"; shift 2 ;;
       --deliverable) _need_val confirm-base --deliverable "$#"; del="$2"; shift 2 ;;
+      --call-id) _need_val confirm-base --call-id "$#"; cid="$2"; shift 2 ;;
       --fallback-phase) _need_val confirm-base --fallback-phase "$#"; fb="$2"; shift 2 ;;
       *) echo "devflow: confirm-base: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
-  [ -n "$ph" ] && [ -n "$del" ] || { echo "devflow: confirm-base: --phase and --deliverable are required" >&2; exit 2; }
-  case "$ph$del$fb" in *[!A-Za-z0-9._-]*) echo "devflow: confirm-base: values must match [A-Za-z0-9._-]*" >&2; exit 2 ;; esac
-  local dst="$RUN_DIR/$ph-confirm-base-$del.gittree" src=""
+  [ -n "$ph" ] && [ -n "$del" ] && [ -n "$cid" ] || { echo "devflow: confirm-base: --phase, --deliverable and --call-id are required" >&2; exit 2; }
+  case "$ph$del$cid$fb" in *[!A-Za-z0-9._-]*) echo "devflow: confirm-base: values must match [A-Za-z0-9._-]*" >&2; exit 2 ;; esac
+  local dst="$RUN_DIR/$ph-confirm-base-$del-$cid.gittree" src=""
   if [ ! -s "$dst" ]; then
     [ -s "$RUN_DIR/$ph-reviewed.gittree" ] && src="$RUN_DIR/$ph-reviewed.gittree"
     [ -z "$src" ] && [ -n "$fb" ] && [ -s "$RUN_DIR/$fb-reviewed.gittree" ] && src="$RUN_DIR/$fb-reviewed.gittree"   # B2
@@ -1727,8 +1765,8 @@ main() {
         echo "       $(basename "$0") freshness-check --phase <p> [--file <path>] | scope-digest [--base <sha>] [--tree-out <file>]"
         echo "       $(basename "$0") checks run [--config <resolved-config.json>] [--base <sha>] (exit 0 pass, 1 fail, 3 none, 2 INVALID_CHECKS/usage, 4 SNAPSHOT_FAILED)"
         echo "       $(basename "$0") gate --phase <final-review|impl-review> [--base <sha>] [--fallback-phase <p>] (exit 0 GATE=ok, 1 GATE=blocked + REASON= lines, 2 usage, 4 snapshot failed)"
-        echo "       $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> [--confirm] (exit 2 BUDGET_NOT_INITIALIZED, 3 BUDGET_EXHAUSTED / CONFIRM_ALREADY_USED, 4 CONFIRM_NOT_NEEDED, 9 CALL_ALREADY_CLOSED) | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>"
-        echo "       $(basename "$0") confirm-base --phase <p> --deliverable <d> [--fallback-phase <p>] (exit 0 CONFIRM_BASE=<path>, 1 NO_REVIEWED_TREE, 2 usage)"
+        echo "       $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> [--confirm --open <n>] (exit 2 BUDGET_NOT_INITIALIZED, 3 BUDGET_EXHAUSTED / CONFIRM_STILL_OPEN / CONFIRM_STALLED, 4 CONFIRM_NOT_NEEDED, 9 CALL_ALREADY_CLOSED) | passes close --deliverable <id> --call-id <cid> [--open <n>, confirm only] | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>"
+        echo "       $(basename "$0") confirm-base --phase <p> --deliverable <d> --call-id <cid> [--fallback-phase <p>] (exit 0 CONFIRM_BASE=<path>, 1 NO_REVIEWED_TREE, 2 usage)"
         echo "       $(basename "$0") preflight --roles-file <path> --host <claude|codex|gemini|cursor|opencode> [--expect-host <h>] [--write-effective <path>] (exit 4 MISSING_AGENT, 5 NO_NAMED_AGENTS, 6 INVALID_PROFILE, 7 HOST_MISMATCH)"
         echo "       $(basename "$0") profile-init --roles-file <path> --host <claude|codex|gemini|cursor|opencode> [--expect-host <h>] (writes profile-active/max-passes/effective-roles.json; same exit codes as preflight, plus 2 for a bad --roles-file)"
         echo "       $(basename "$0") deliverable-id --phase <plan|impl|review> [--plan-path <p>] [--baseline <sha>] (exit 2 NO_IMPL_BASE/NO_BASELINE, 8 DELIVERABLE_CHANGED old=<x> new=<y>)"

@@ -227,13 +227,19 @@ which lens a pass used for the report.
   No `--max` flag any more; it reads the budget `init` already fixed and refuses to run if `init`
   was never called (never defaults to unlimited). The same `--call-id` reserved twice is a no-op,
   never a double charge.
-- `passes reserve --deliverable <id> --call-id <cid> --confirm` — reserves the single
-  diff-only confirmation pass that is allowed *outside* the budget once `max_passes` is spent
-  and a fix has not been re-reviewed. Allowed once per deliverable; recorded in the same ledger
-  with a 4th field `confirm`, which `used` does not count. A second confirm id exits `3`
-  `CONFIRM_ALREADY_USED`; while budget remains (or is unlimited) it exits `4`
-  `CONFIRM_NOT_NEEDED`, so it can never become a free extra pass.
-- `passes close --deliverable <id> --call-id <cid>` — marks a reserved call closed.
+- `passes reserve --deliverable <id> --call-id <cid> --confirm --open <n>` — reserves one
+  diff-only confirmation round that is allowed *outside* the budget once `max_passes` is spent
+  and a fix has not been re-reviewed. `--open <n>` is the number of CONFIRMED + Important findings
+  the fix wave addressed. Rounds are not capped at one: each fix wave gets its own, and each is
+  recorded in the same ledger with a 4th field `confirm` (`cid, ts, -, confirm, open-before, open-after`),
+  which `used` does not count. The runner refuses a round with exit `3` `CONFIRM_STILL_OPEN` while
+  another round is open, and with exit `3` `CONFIRM_STALLED` after two consecutive rounds that did
+  not reduce the open count (the no-progress rule). While budget remains (or is unlimited) it exits
+  `4` `CONFIRM_NOT_NEEDED`, so it can never become a free extra pass. A same-id replay of an open
+  round is a no-op (`0`).
+- `passes close --deliverable <id> --call-id <cid>` — marks a reserved call closed. A confirm
+  round also takes `--open <n>`: the open count after its verdict (this is what the no-progress
+  rule reads). `--open` on an ordinary call, or a confirm without it, exits `2`.
 - `passes status --deliverable <id>` — always exits `0`; prints
   `used=<u> max=<n|-> open=<call-id,...> done=<yes|no> scope=<digest|->` (`max=-` when `init`
   was never called), plus a trailing ` confirm=<call-id>` once a confirmation pass was reserved.
@@ -258,8 +264,11 @@ which lens a pass used for the report.
 | `passes reserve` | `0` | Reserved, or the same `--call-id` was already reserved (no-op). |
 | `passes reserve` | `2` | `BUDGET_NOT_INITIALIZED` — `passes init` was never called for this deliverable. |
 | `passes reserve` | `3` | `BUDGET_EXHAUSTED used=<u> max=<n>`. |
-| `passes reserve` | `3` | `CONFIRM_ALREADY_USED` — `--confirm` and this deliverable's one confirmation pass was already reserved. |
+| `passes reserve` | `3` | `CONFIRM_STILL_OPEN call-id=<cid>` — another confirmation round is still open. |
+| `passes reserve` | `3` | `CONFIRM_STALLED` — two consecutive confirmation rounds did not reduce the open blocking count. Stop as `NEEDS_USER_DECISION`. |
 | `passes reserve` | `4` | `CONFIRM_NOT_NEEDED` — `--confirm` while budget remains (or is unlimited). |
+| `passes reserve` | `2` | `--confirm` without a digit-only `--open`, or `--open` without `--confirm` (usage). |
+| `passes reserve` | `9` | `--call-id` already closed (replay). |
 | `passes close` | `0` | Closed. |
 | `passes close` | `1` | No reservation found for that deliverable/call-id. |
 | `passes complete` | `0` | `.done` record written. |

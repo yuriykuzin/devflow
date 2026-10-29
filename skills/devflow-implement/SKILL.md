@@ -365,18 +365,19 @@ fi
 changeset — that is what lets `run` skip a redundant re-review (see `devflow:run`'s
 "No double review"). If reserve wrote `exhausted` to `impl-review-reserve.state` (reserve
 returned rc 3): wait for any reviews already dispatched this round, then — if any finding from
-the last round is still open, stop as `NEEDS_USER_DECISION` — "review budget exhausted; further
-review only with new execution evidence"; if nothing is open, check that the last review still
-describes the tree: `bash "$RUNNER" gate --phase impl-review --base "$(cat "$RUN_DIR/impl-base")"`.
-With `REVIEWED=fresh`, skip remaining reviewer calls this round and go to the verifier hook /
-Step 7 (Finalize). With `REVIEWED=stale` or `missing`, fixes exist that no reviewer has read. Do
-not stop yet: run the **confirmation pass** (Step 6, "Confirmation pass (budget spent)") — one
-diff-only review outside the budget, at most one per deliverable. Only if `passes reserve
---confirm` refuses it (rc `3` `CONFIRM_ALREADY_USED`) stop as `NEEDS_USER_DECISION` — "review
-budget exhausted with unreviewed fixes" — with blocker `GATE-unreviewed-changes`. Never end `DONE`
-on code nobody reviewed. A finding you fixed in the last wave is "fixed, awaiting confirmation",
-not "open", for this rule. Any reserve exit other than 0, 3, or
-9 is `FAILED` — quote the runner's line, never relabel it as exhaustion.
+the last round is still open (not fixed), stop as `NEEDS_USER_DECISION` — "review budget
+exhausted; further review only with new execution evidence"; if nothing is open, check that the
+last review still describes the tree: `bash "$RUNNER" gate --phase impl-review --base "$(cat
+"$RUN_DIR/impl-base")"`. With `REVIEWED=fresh`, skip remaining reviewer calls this round and go to
+the verifier hook / Step 7 (Finalize). With `REVIEWED=stale` or `missing`, fixes exist that no
+reviewer has read. Do not stop yet: run a **confirmation round** (Step 6, "Confirmation pass
+(budget spent)") — one diff-only review outside the budget. It is not capped at one: every fix
+wave that changes the tree gets its own round. Only the runner's no-progress stop
+(`CONFIRM_STALLED`, rc `3`) ends it as `NEEDS_USER_DECISION` — "review budget exhausted with
+unreviewed fixes" — with blocker `GATE-unreviewed-changes`. Never end `DONE` on code nobody
+reviewed. A finding you fixed in the last wave is "fixed, awaiting confirmation", not "open", for
+this rule. Any reserve exit other than 0, 3, or 9 is `FAILED` — quote the runner's line, never
+relabel it as exhaustion.
 
 **Internal review** (multi-persona, background sub-agents — unbound path only, see above):
 Read persona definitions from the plugin's `skills/devflow-review/references/review-personas.md`
@@ -601,25 +602,39 @@ Before deciding, run the finding verifier for this round per `devflow:review`'s
 When fixing issues, use the current tool's capabilities (edit files, run tests). Do NOT call the external tool for fixes — only for review.
 
 **Confirmation pass (budget spent).** When `passes reserve` returns rc `3` while you have fixes
-no reviewer has read (`gate` says `REVIEWED=stale`), run ONE diff-only review outside the
-budget. It is capped at one per deliverable by the runner. Implement and run's final review share
-the deliverable, so they share this one confirm; if the run's final review later finds the
-confirm already used (rc `3`), that is `NEEDS_USER_DECISION`. One confirm per deliverable, by design.
+no reviewer has read (`gate` says `REVIEWED=stale`), run a diff-only review outside the budget
+(one **confirmation round**). The budget is for full reviews; a confirm round is not charged
+against it, and it is not capped at one per deliverable: every fix wave that changes the tree gets
+its own round, each diffed against the tree the previous round promoted. Implement and run's final
+review share the deliverable's rounds. The runner stops the loop with `CONFIRM_STALLED` (rc `3`)
+after two consecutive rounds that did not reduce the open blocking findings.
+
+**Progress.** `OPEN_BEFORE` = CONFIRMED + Important findings this fix wave addressed (open when the
+round starts). `OPEN_AFTER` = CONFIRMED + Important findings still open after the round's verdict:
+blockers the round did not close, plus any new confirmed blocker. A round made progress when
+`OPEN_AFTER < OPEN_BEFORE`. A fix wave that leaves the tree unchanged never reaches a round: the
+gate reads `REVIEWED=fresh`, and Step 5 stops it while blockers are open.
 
 ```bash
 RUN_DIR="$(bash "$RUNNER" dir | sed -n 's/^RUN_DIR=//p')"
 PHASE=impl-review; BASE="$(cat "$RUN_DIR/impl-base")"
 DELIVERABLE="$(cat "$RUN_DIR/deliverable")"
-# FIRST, before reserve: freeze the diff base (written once, only if absent; DG-02/B4). A replay
-# after compaction reuses it.
-CB_OUT="$(bash "$RUNNER" confirm-base --phase "$PHASE" --deliverable "$DELIVERABLE")" \
+RND_FILE="$RUN_DIR/$PHASE-confirm-round"; N="$(cat "$RND_FILE" 2>/dev/null || echo 1)"; CID="$PHASE-confirm-$N"
+OPEN_BEFORE=<n>   # CONFIRMED + Important findings this fix wave addressed (set by you from the last verdict)
+# FIRST, before reserve: freeze this round's diff base (written once per call id, only if absent;
+# DG-02/B4). A replay after compaction reuses it. Round N+1 starts from what round N promoted.
+CB_OUT="$(bash "$RUNNER" confirm-base --phase "$PHASE" --deliverable "$DELIVERABLE" --call-id "$CID")" \
   || { echo "devflow: no reviewed tree recorded -> NEEDS_USER_DECISION (GATE-unreviewed-changes)" >&2; exit 1; }
 CONFIRM_BASE="${CB_OUT#CONFIRM_BASE=}"
-RES="$(bash "$RUNNER" passes reserve --deliverable "$DELIVERABLE" --call-id "$PHASE-confirm" --confirm)"; RRC=$?
+RES="$(bash "$RUNNER" passes reserve --deliverable "$DELIVERABLE" --call-id "$CID" --confirm --open "$OPEN_BEFORE")"; RRC=$?
 case "$RRC" in
   0) : ;;
-  9) echo "confirm already made and closed — reuse its recorded verdict"; exit 0 ;;
-  3|4) echo "devflow: $RES -> NEEDS_USER_DECISION (GATE-unreviewed-changes)" >&2; exit 1 ;;
+  9) echo "devflow: $CID already closed -> FAILED; a crash after close left the counter behind: set $RND_FILE to $((N+1)) and re-run the gate" >&2; exit 1 ;;
+  3) case "$RES" in
+       CONFIRM_STALLED*) echo "devflow: $RES -> NEEDS_USER_DECISION (GATE-unreviewed-changes)" >&2; exit 1 ;;
+       *) echo "devflow: passes reserve --confirm failed (3): $RES -> FAILED" >&2; exit 1 ;;
+     esac ;;
+  4) echo "devflow: $RES -> FAILED (budget is not spent; a confirm round is not needed)" >&2; exit 1 ;;
   *) echo "devflow: passes reserve --confirm failed ($RRC): $RES -> FAILED" >&2; exit 1 ;;
 esac
 # The dispatch record goes to .pending files, NOT the real reviewed.digest/.gittree: those are promoted only
@@ -650,8 +665,11 @@ RC=$?
 mv -f "$RUN_DIR/impl-review-reviewed.gittree.pending" "$RUN_DIR/impl-review-reviewed.gittree" \
   && mv -f "$RUN_DIR/impl-review-reviewed.digest.pending" "$RUN_DIR/impl-review-reviewed.digest" \
   || { echo "devflow: cannot promote the confirm's reviewed record -> FAILED; reservation left open" >&2; exit 1; }
-bash "$RUNNER" passes close --deliverable "$DELIVERABLE" --call-id "impl-review-confirm" \
+# OPEN_AFTER = CONFIRMED + Important findings still open after this verdict (set it from the verdict).
+OPEN_AFTER=<n>
+bash "$RUNNER" passes close --deliverable "$DELIVERABLE" --call-id "$CID" --open "$OPEN_AFTER" \
   || { echo "devflow: cannot close the confirm reservation -> FAILED" >&2; exit 1; }
+echo $((N+1)) > "$RND_FILE"    # the next round is N+1; only advanced after the close succeeded
 ```
 
 An internal reviewer is the same, minus `run-external`: only once it returned a usable verdict run
@@ -663,7 +681,10 @@ re-runs the block and may retry), never closed.
   → `passes complete --verdict clean` (check its exit code: it refuses while any call is still
   open — non-zero is `FAILED`, quote its line) → `DONE`.
 - A new confirmed blocker, or any edit after the confirm → `NEEDS_USER_DECISION`, with the IDs
-  (or `GATE-unreviewed-changes`). There is no second confirm.
+  (or `GATE-unreviewed-changes`).
+- Blockers still open but the last round made progress (`OPEN_AFTER < OPEN_BEFORE`) → fix the
+  remaining IDs, then run the next round (`N+1`, same block). Two consecutive rounds without
+  progress → the runner refuses with `CONFIRM_STALLED` → `NEEDS_USER_DECISION`.
 
 **Execution profile — bound implementer + verifier.** Read `IMPL_AGENT`/`VER_AGENT` fresh from
 `$RUN_DIR/effective-roles.json`. If `IMPL_AGENT` is set,

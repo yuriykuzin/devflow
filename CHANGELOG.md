@@ -31,10 +31,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - A run ends `DONE` only when `gate` exits `0`, on every path including the default (no profile)
   one. A fix after the last review needs one more review pass. With `review.max_passes` spent,
-  that is one diff-only confirmation pass outside the budget (`passes reserve --confirm`: once
-  per deliverable, recorded in the pass ledger but not counted in `used`; exit `3`
-  `CONFIRM_ALREADY_USED` on a second one, `4` `CONFIRM_NOT_NEEDED` while budget remains). Only
-  when that is used up does the run end `NEEDS_USER_DECISION` (`GATE-unreviewed-changes`).
+  that is a diff-only confirmation round outside the budget (`passes reserve --confirm --open <n>`:
+  one per fix wave, not capped, recorded in the pass ledger but not counted in `used`; `4`
+  `CONFIRM_NOT_NEEDED` while budget remains). The run ends `NEEDS_USER_DECISION`
+  (`GATE-unreviewed-changes`) only on `CONFIRM_STALLED`: two consecutive rounds that did not
+  reduce the open blocking count. A budget never blocks re-review of real fixes.
   Projects with no checks opt out with `checks.commands: ["true"]`.
 - `scope-digest --tree-out <file>` also records a git tree object of the working tree (throwaway
   index; real index untouched; a failure warns and keeps the digest). Each reviewer dispatch writes
