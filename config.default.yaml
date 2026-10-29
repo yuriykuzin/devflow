@@ -18,6 +18,8 @@
 # unlimited. On the unbound path (no `roles.*.agent` set), one review round costs (personas +
 # external calls) passes, not one — set `max_passes` at least that high, or bind
 # `roles.reviewer.agent` to a single named agent to make a round cost exactly one pass.
+# Once the budget is spent, fixes are re-checked by diff-only confirmation rounds that sit
+# outside `max_passes` and are not capped; the run stops only on the no-progress rule (README).
 #
 # TRUST RULE (same as codex.command_path below): `roles.*.agent`, `review.max_passes`, and
 # `review.fallback_to_host` are read from ~/.devflow/config.yaml and this file ONLY. A
@@ -110,6 +112,17 @@ autonomy: attended
 
 # Where to save reports and artifacts
 output_dir: "docs/devflow/reports"
+
+# ──────────────────────────────────────────────────────────────
+# PRE-REVIEW CHECKS — tests / lint / build run before every review round
+# ──────────────────────────────────────────────────────────────
+# Empty list = discover from the project (test/run.sh, Makefile test/lint, package.json
+# lint/typecheck/build/test, rspec/rubocop, pytest); the discovered commands are recorded in
+# $RUN_DIR/checks.txt. A run cannot end DONE unless the checks passed on the last reviewed tree.
+# A project with genuinely no checks opts out explicitly: commands: ["true"].
+# A project .devflow.yaml may set this (discovery already runs repo code).
+checks:
+  commands: []
 
 # ──────────────────────────────────────────────────────────────
 # Multi-persona review

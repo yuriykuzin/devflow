@@ -213,5 +213,15 @@ YAML
 out14="$(fields "$ROLES_AGENT_EMPTY" 2>&1)"; rc14=$?
 is "$rc14" "0" 'roles.reviewer.agent: "" stays valid (explicit default-execution-path sentinel)'
 
+# (N) checks.commands: default [] comes through; a project list replaces it (not trust-filtered).
+out="$(resolve --global "$GLOBAL_MISSING" --project-root "$PROJ_EMPTY" 2>/dev/null)"
+is "$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checks"]["commands"])')" "[]" \
+  "checks.commands defaults to an empty list (= discover)"
+PROJ_CHK="$TD/proj-checks"; mkdir -p "$PROJ_CHK"
+printf 'checks:\n  commands: ["make test", "npm run lint"]\n' > "$PROJ_CHK/.devflow.yaml"
+out="$(resolve --global "$GLOBAL_MISSING" --project-root "$PROJ_CHK" 2>/dev/null)"
+is "$(printf '%s' "$out" | python3 -c 'import json,sys; print("|".join(json.load(sys.stdin)["checks"]["commands"]))')" "make test|npm run lint" \
+  "a project .devflow.yaml may set checks.commands (not a trusted path)"
+
 rm -rf "$TD"
 report

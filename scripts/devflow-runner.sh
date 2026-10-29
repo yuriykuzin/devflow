@@ -474,6 +474,26 @@ devflow_snapshot_digest() {
   return $rc
 }
 
+# One pathspec that keeps devflow's OWN reports out of every snapshot: "no output" or
+# ":(exclude,literal)<repo-relative output_dir>". Reports are written into output_dir after a
+# phase's gate; without this they change the digest the gate/scope comparison just recorded.
+_devflow_snapshot_exclude() {
+  local top="$1" rel
+  rel="$(python3 -c '
+import json, os, sys
+try:
+    od = json.load(open(sys.argv[1])).get("output_dir") or "docs/devflow/reports"
+except Exception:
+    od = "docs/devflow/reports"
+top = os.path.realpath(sys.argv[2])
+p = os.path.realpath(od if os.path.isabs(od) else os.path.join(sys.argv[3], od))
+if p != top and p.startswith(top + os.sep):
+    print(os.path.relpath(p, top))
+' "$RUN_DIR/resolved-config.json" "$top" "$DEVFLOW_PROJECT_ROOT" 2>/dev/null)"
+  [ -n "$rel" ] && printf ':(exclude,literal)%s\n' "$rel"
+  return 0
+}
+
 # The worktree flavour of the snapshot.
 # Captures CONTENT, not just status: editing an already-modified file leaves both HEAD and
 # `git status --porcelain` unchanged, so a status-only snapshot would pass on unread code.
@@ -494,6 +514,7 @@ devflow_tree_snapshot() {
   # caller's CWD instead of the repo — a snapshot of the wrong tree, not a detectable failure.
   [ -n "$TOP" ] || exit 1
   cd "$TOP" || exit 1
+  PSPEC=(.); EX="$(_devflow_snapshot_exclude "$TOP")"; [ -n "$EX" ] && PSPEC+=("$EX")
   # A snapshot must not run programs the repo names in its own config or gitattributes: they
   # could report a constant, and the diff section is the ONLY content-bearing part for tracked
   # files, so a constant there makes an edited tree look unchanged — the fail-open this gate
@@ -525,15 +546,15 @@ devflow_tree_snapshot() {
   # `?? d/`, which left the file boundaries inside it conveyed ONLY by the `###` headers below —
   # forgeable, see the framing comment there. With -uall the untracked file SET is recorded here,
   # independently of that framing, so the two sections corroborate each other.
-  git -c core.fsmonitor= status --porcelain -uall || exit 1
-  git -c core.fsmonitor= -c diff.external= diff --no-ext-diff --no-textconv "$DIFF_BASE" || exit 1
+  git -c core.fsmonitor= status --porcelain -uall -- "${PSPEC[@]}" || exit 1
+  git -c core.fsmonitor= -c diff.external= diff --no-ext-diff --no-textconv "$DIFF_BASE" -- "${PSPEC[@]}" || exit 1
   # Every header carries a BYTE COUNT, and that is what makes the framing unforgeable. Without
   # it the entry separator was just the text `### <path>`, which a file is free to contain: one
   # file holding "X\n### d/b\nY\n" serialized byte-identically to two files d/a="X\n" d/b="Y\n",
   # so a reviewer read one tree and the implementer could ship the other under FRESH=yes. The
   # same trick with `@symlink -> t` let a regular file impersonate a symlink. With a length the
   # reader's framing no longer depends on content the tree controls.
-  git -c core.fsmonitor= ls-files -o -z --exclude-standard | while IFS= read -r -d '' f; do
+  git -c core.fsmonitor= ls-files -o -z --exclude-standard -- "${PSPEC[@]}" | while IFS= read -r -d '' f; do
     if [ -L "$f" ]; then
       LINK="$(readlink -- "$f")" || exit 1
       printf '### %s @symlink %s\n%s\n' "$f" "${#LINK}" "$LINK"
@@ -603,10 +624,11 @@ cmd_freshness_check() {
 # diff section is taken against (still reading the actual current tree); with no --base it's
 # relative to HEAD, matching devflow_tree_snapshot's default.
 cmd_scope_digest() {
-  local base=""
+  local base="" tree_out=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --base) _need_val scope-digest --base "$#"; base="$2"; shift 2 ;;
+      --tree-out) _need_val scope-digest --tree-out "$#"; tree_out="$2"; shift 2 ;;
       *) echo "devflow: scope-digest: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
@@ -616,7 +638,238 @@ cmd_scope_digest() {
     exit 1
   }
   printf '%s\n' "$digest"
+  # N2: the digest is always printed. A --tree-out failure warns and removes the old tree file (a
+  # stale tree must never be diffed); the confirm block then finds no gittree and ends NEEDS_USER_DECISION.
+  if [ -n "$tree_out" ]; then
+    local tree
+    rm -f "$tree_out"
+    if tree="$(_devflow_worktree_tree)" && [ -n "$tree" ]; then
+      printf '%s\n' "$tree" > "$tree_out" \
+        || { rm -f "$tree_out"; echo "devflow: WARN — scope-digest: cannot write $tree_out; no diff base for a confirmation pass" >&2; }
+    else
+      echo "devflow: WARN — scope-digest: could not record the working-tree object for --tree-out; no diff base for a confirmation pass" >&2
+    fi
+  fi
   exit 0
+}
+
+# A git TREE object of the current working tree (tracked + untracked non-ignored), built in a
+# throwaway index so the real index and the worktree are untouched. A digest is a one-way hash;
+# this is what lets a confirmation pass be scoped to "the diff since the last reviewed state":
+# `git diff <old tree> <new tree>`. Blobs land in the object store unreferenced (normal gc).
+_devflow_worktree_tree() {
+  local idx="$RUN_DIR/.tree-index.$$" rc ex=""
+  rm -f "$idx"
+  (
+    cd "$DEVFLOW_PROJECT_ROOT" || exit 1
+    if git rev-parse -q --verify HEAD >/dev/null; then GIT_INDEX_FILE="$idx" git read-tree HEAD || exit 1
+    else GIT_INDEX_FILE="$idx" git read-tree --empty || exit 1; fi
+    # Same pathspec as the digest snapshot (Task 1b): devflow's own output_dir is never in a tree.
+    ex="$(_devflow_snapshot_exclude "$(git rev-parse --show-toplevel)")"
+    GIT_INDEX_FILE="$idx" git add -A -- . ${ex:+"$ex"} >/dev/null || exit 1
+    GIT_INDEX_FILE="$idx" git write-tree
+  ); rc=$?
+  rm -f "$idx"
+  return $rc
+}
+
+# ── pre-review checks (checks.commands) ─────────────────────────────────────
+# Runs the project's tests/lint/build against the CURRENT tree and leaves two files:
+#   checks.txt     header, then per command "### $ <cmd>", its combined output, "### exit=<rc>"
+#   checks.status  ONE line: status=<pass|fail|none> digest=<d> base=<b|-> source=<config|discovered>
+#                  ran=<n> failed=<n>
+# checks.status is deleted BEFORE anything runs and written LAST (tmp + mv). A killed run therefore
+# leaves no status, never a stale pass, and a check that writes "status=pass" there itself is
+# overwritten by the real outcome. The digest is taken BEFORE the commands run, and again after:
+# a run that changed the tree is a fail (DECISION-checks-tree-mutation). The `gate` subcommand
+# reads this line; it is hygiene against the orchestrator's own drift, not a security boundary.
+_devflow_checks_from_config() {
+  # $1 = resolved-config.json. Prints one command per line (nothing = discover). exit 2 + an
+  # INVALID_CHECKS line on a bad shape — a typo must never silently fall back to discovery.
+  python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception as e:
+    print("INVALID_CHECKS unreadable config: %s" % e); sys.exit(2)
+c = d.get("checks") if isinstance(d, dict) else None
+if c is None:
+    sys.exit(0)
+if not isinstance(c, dict):
+    print("INVALID_CHECKS checks must be a mapping"); sys.exit(2)
+cmds = c.get("commands")
+if cmds is None:
+    cmds = []
+if not isinstance(cmds, list) or not all(isinstance(x, str) and x.strip() and "\n" not in x for x in cmds):
+    print("INVALID_CHECKS checks.commands must be a list of non-empty one-line strings"); sys.exit(2)
+for x in cmds:
+    print(x)
+' "$1"
+}
+
+_devflow_checks_discover() {
+  # $1 = project root. DECISION-checks-discovery: every matching source, fixed order, no dedupe.
+  local root="$1" pm=npm
+  [ -f "$root/test/run.sh" ] && echo "bash test/run.sh"
+  if [ -f "$root/Makefile" ]; then
+    grep -qE '^test:' "$root/Makefile" && echo "make test"
+    grep -qE '^lint:' "$root/Makefile" && echo "make lint"
+  fi
+  if [ -f "$root/package.json" ]; then
+    [ -f "$root/pnpm-lock.yaml" ] && pm=pnpm
+    [ -f "$root/yarn.lock" ] && pm=yarn
+    python3 -c '
+import json, sys
+try:
+    s = json.load(open(sys.argv[1])).get("scripts") or {}
+except Exception:
+    sys.exit(0)
+for k in ("lint", "typecheck", "build", "test"):
+    v = s.get(k)
+    if isinstance(v, str) and v.strip() and "no test specified" not in v:
+        print(k)
+' "$root/package.json" | while IFS= read -r s; do echo "$pm run $s"; done
+  fi
+  if [ -f "$root/Gemfile" ]; then
+    [ -d "$root/spec" ] && echo "bundle exec rspec"
+    [ -f "$root/.rubocop.yml" ] && echo "bundle exec rubocop"
+  fi
+  if [ -f "$root/pytest.ini" ] || grep -q '^\[tool\.pytest' "$root/pyproject.toml" 2>/dev/null; then
+    echo "python3 -m pytest"
+  fi
+  return 0
+}
+
+cmd_checks() {
+  local sub="${1:-}"; shift || true
+  [ "$sub" = run ] || { echo "devflow: checks: unknown subcommand '$sub' (expected: run)" >&2; exit 2; }
+  local cfg="" base=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --config) _need_val "checks run" --config "$#"; cfg="$2"; shift 2 ;;
+      --base)   _need_val "checks run" --base "$#"; base="$2"; shift 2 ;;
+      *) echo "devflow: checks run: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  # Validate BEFORE touching checks.status: an invalid config must not destroy the last real result.
+  local cmds="" src=config out rc
+  if [ -n "$cfg" ]; then
+    [ -f "$cfg" ] || { echo "devflow: checks run: --config must name an existing file (got '$cfg')" >&2; exit 2; }
+    out="$(_devflow_checks_from_config "$cfg")"; rc=$?
+    [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; exit 2; }
+    cmds="$out"
+  fi
+  if [ -z "$cmds" ]; then cmds="$(_devflow_checks_discover "$DEVFLOW_PROJECT_ROOT")"; src=discovered; fi
+
+  local txt="$RUN_DIR/checks.txt" stf="$RUN_DIR/checks.status"
+  rm -f "$stf"
+  local before after tree_before="" tree_after=""
+  before="$(devflow_snapshot_digest "" "$base")" || { echo "SNAPSHOT_FAILED"; exit 4; }
+  tree_before="$(_devflow_worktree_tree 2>/dev/null)"   # N4: only used to NAME what a check changed
+  printf '# devflow checks source=%s base=%s digest=%s\n' "$src" "${base:--}" "$before" > "$txt"
+  local ran=0 failed=0 c crc
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    ran=$((ran + 1))
+    printf '### $ %s\n' "$c" >> "$txt"
+    # Every command runs, even after a failure: the reviewer needs the whole picture.
+    ( cd "$DEVFLOW_PROJECT_ROOT" && bash -c "$c" ) </dev/null >> "$txt" 2>&1; crc=$?
+    printf '### exit=%s\n' "$crc" >> "$txt"
+    [ "$crc" -eq 0 ] || failed=$((failed + 1))
+  done <<< "$cmds"
+
+  local st=pass
+  if [ "$ran" -eq 0 ]; then st=none; echo "### no checks configured or discovered" >> "$txt"
+  elif [ "$failed" -gt 0 ]; then st=fail; fi
+  if [ "$ran" -gt 0 ]; then
+    after="$(devflow_snapshot_digest "" "$base")" || after=""
+    if [ "$after" != "$before" ]; then
+      printf '### tree changed while checks ran (digest %s -> %s)\n' "$before" "${after:-snapshot-failed}" >> "$txt"
+      # N4: name the paths, so the operator can fix it (usually build output that needs ignoring).
+      tree_after="$(_devflow_worktree_tree 2>/dev/null)"
+      if [ -n "$tree_before" ] && [ -n "$tree_after" ]; then
+        printf '### changed paths:\n' >> "$txt"
+        git -C "$DEVFLOW_PROJECT_ROOT" diff --name-only "$tree_before" "$tree_after" 2>/dev/null | sed 's/^/###   /' >> "$txt"
+      fi
+      printf '### if these are build/test output, add them to .gitignore; if a linter autofixed them, commit or revert and re-run\n' >> "$txt"
+      st=fail
+    fi
+  fi
+  { printf 'status=%s digest=%s base=%s source=%s ran=%s failed=%s\n' \
+      "$st" "$before" "${base:--}" "$src" "$ran" "$failed" > "$stf.tmp.$$" && mv -f "$stf.tmp.$$" "$stf"; } \
+    || { rm -f "$stf.tmp.$$"; echo "devflow: checks run: could not write $stf" >&2; exit 4; }
+  echo "CHECKS=$st"
+  echo "CHECKS_FILE=$txt"
+  echo "CHECKS_STATUS_FILE=$stf"
+  case "$st" in pass) exit 0 ;; fail) exit 1 ;; *) exit 3 ;; esac
+}
+
+# ── DONE gate ────────────────────────────────────────────────────────────────
+# One question, asked mechanically: may this phase end DONE? Two conditions:
+#   REVIEWED  the current scope digest equals $RUN_DIR/<phase>-reviewed.digest, the digest the
+#             skills record at EVERY reviewer dispatch (internal and external). A fix made after
+#             the last review makes it stale: at least one more review pass is required.
+#             Snapshots exclude devflow's own output_dir (Task 1b), so a saved report never
+#             makes the gate stale.
+#   CHECKS    checks.status says pass, for this same digest and base.
+# Prints REVIEWED=<fresh|stale|missing>, CHECKS=<pass|fail|none|stale|missing>, GATE=<ok|blocked>,
+# then one REASON=<r> line per blocker: no-review-recorded, unreviewed-changes, checks-failed,
+# checks-not-run, checks-stale, checks-missing.
+# Exit 0 ok, 1 blocked, 2 usage, 4 snapshot failed (N6: same code as `checks run`; a
+# tool/environment failure, maps to FAILED).
+# --fallback-phase <p>: only when <phase>-reviewed.digest is MISSING, read <p>-reviewed.digest
+#   instead (B2: implement spent the whole budget, so Phase 3 never dispatched). The digest embeds
+#   its diff base, so it matches only when the bases match; otherwise it reads stale.
+cmd_gate() {
+  local ph="" base="" fb=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --phase) _need_val gate --phase "$#"; ph="$2"; shift 2 ;;
+      --base)  _need_val gate --base "$#"; base="$2"; shift 2 ;;
+      --fallback-phase) _need_val gate --fallback-phase "$#"; fb="$2"; shift 2 ;;
+      *) echo "devflow: gate: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$ph" ] || { echo "devflow: gate: --phase is required" >&2; exit 2; }
+  case "$ph" in *[!A-Za-z0-9._-]*|.|..) echo "devflow: gate: --phase must match [A-Za-z0-9._-]+ and not be '.' or '..'" >&2; exit 2 ;; esac
+
+  case "$fb" in *[!A-Za-z0-9._-]*|.|..) echo "devflow: gate: --fallback-phase must match [A-Za-z0-9._-]+ and not be '.' or '..'" >&2; exit 2 ;; esac
+
+  local cur
+  cur="$(devflow_snapshot_digest "" "$base")" || { echo "GATE=blocked"; echo "REASON=snapshot-failed"; exit 4; }
+
+  local reviewed rv reasons=""
+  reviewed="$(head -n 1 "$RUN_DIR/$ph-reviewed.digest" 2>/dev/null)"
+  [ -n "$reviewed" ] || { [ -z "$fb" ] || reviewed="$(head -n 1 "$RUN_DIR/$fb-reviewed.digest" 2>/dev/null)"; }
+  if [ -z "$reviewed" ]; then rv=missing; reasons="no-review-recorded"
+  elif [ "$reviewed" = "$cur" ]; then rv=fresh
+  else rv=stale; reasons="unreviewed-changes"; fi
+
+  local line ck=missing cst cdig cbase
+  line="$(head -n 1 "$RUN_DIR/checks.status" 2>/dev/null)"
+  if [ -n "$line" ]; then
+    cst="$(printf '%s\n' "$line" | sed -n 's/^status=\([a-z]*\) .*/\1/p')"
+    cdig="$(printf '%s\n' "$line" | sed -n 's/.* digest=\([^ ]*\).*/\1/p')"
+    cbase="$(printf '%s\n' "$line" | sed -n 's/.* base=\([^ ]*\).*/\1/p')"
+    if [ "$cdig" = "$cur" ] && [ "$cbase" = "${base:--}" ]; then ck="${cst:-missing}"; else ck=stale; fi
+  fi
+  case "$ck" in
+    pass)  : ;;
+    fail)  reasons="$reasons checks-failed" ;;
+    none)  reasons="$reasons checks-not-run" ;;
+    stale) reasons="$reasons checks-stale" ;;
+    *)     ck=missing; reasons="$reasons checks-missing" ;;
+  esac
+
+  local out grc=1 r
+  out="REVIEWED=$rv"$'\n'"CHECKS=$ck"
+  if [ -z "${reasons// /}" ]; then out="$out"$'\n'"GATE=ok"; grc=0
+  else
+    out="$out"$'\n'"GATE=blocked"
+    for r in $reasons; do out="$out"$'\n'"REASON=$r"; done
+  fi
+  printf '%s\n' "$out"
+  exit "$grc"
 }
 
 # ── pass budget (execution profiles: review.max_passes) ─────────────────────────
@@ -626,7 +879,8 @@ cmd_scope_digest() {
 # not charge twice (compaction/resume replays the same id, never a fresh one).
 #
 # State: one file per deliverable, $RUN_DIR/passes-<deliverable>.tsv, one line per call —
-# "<call-id>\t<reserved-epoch>\t<closed-epoch|->" — plus:
+# "<call-id>\t<reserved-epoch>\t<closed-epoch|->" — a confirmation call adds three fields:
+# "\tconfirm\t<open-before>\t<open-after|->" (see the confirmation section below). Plus:
 #   passes-<deliverable>.max   the budget, written ONCE by `passes init` (fixed for the
 #                              deliverable's life; `dir --fresh` is the only reset). `reserve`
 #                              no longer takes --max — it reads this file, and refuses to run
@@ -634,7 +888,7 @@ cmd_scope_digest() {
 #                              if `init` was never called.
 #   passes-<deliverable>.done  written ONCE by `passes complete`, after every reservation on the
 #                              tsv has been closed — the no-double-review record.
-# `used` is simply the tsv line count: closing a call does not un-charge it.
+# `used` is the tsv line count minus confirm lines: closing a call does not un-charge it.
 #
 # Locking: a `mkdir` lock directory, not `flock` — flock(1) is not part of stock macOS, and this
 # script is otherwise plain POSIX-ish bash with no non-builtin locking dependency. `mkdir` is
@@ -652,6 +906,26 @@ _devflow_passes_lock_dir()  { printf '%s/.passes-%s.lock' "$RUN_DIR" "$1"; }
 # that should have charged, or refuse to close one that should have matched).
 _devflow_passes_has_id() {
   awk -F'\t' -v c="$2" '$1==c{f=1} END{exit !f}' "$1" 2>/dev/null
+}
+
+# `used` = reviewer passes charged to the budget. A confirmation pass (4th tsv field "confirm") is
+# recorded in the same ledger, so close/open/complete treat it like any call, but it is never
+# charged: DECISION-confirm-pass-outside-budget.
+#
+# Confirmation rounds (DECISION-confirm-rounds-no-progress): once the budget is spent, every fix
+# wave that changed the reviewed tree gets a diff-only confirm, however many times it is needed.
+# Progress is measured on the open blocker count: a round made progress when it left fewer open
+# blockers than it started with (open-before comes from `reserve --confirm --open`, open-after
+# from `close --open`). The run stops (CONFIRM_STALLED, exit 3) after CONFIRM_STALL_ROUNDS
+# consecutive confirm rounds without progress. A fix wave that changes nothing never reaches here:
+# the caller's gate still reads the tree as reviewed and the open blockers stop the run.
+CONFIRM_STALL_ROUNDS=2
+_devflow_passes_used()    { awk -F'\t' '$4!="confirm"{n++} END{print n+0}' "$1" 2>/dev/null || echo 0; }
+_devflow_passes_confirm() { awk -F'\t' '$4=="confirm"{p=$1} END{print p}' "$1" 2>/dev/null; }
+_devflow_passes_confirm_stalled() {
+  # True when the last CONFIRM_STALL_ROUNDS closed confirm rounds all left open-after >= open-before.
+  awk -F'\t' -v k="$CONFIRM_STALL_ROUNDS" '$4=="confirm"{ n++; np[n] = ($6+0 >= $5+0) }
+    END { if (n < k) exit 1; for (i = n - k + 1; i <= n; i++) if (!np[i]) exit 1; exit 0 }' "$1" 2>/dev/null
 }
 
 _devflow_passes_lock() {
@@ -704,16 +978,23 @@ cmd_passes_init() {
 }
 
 cmd_passes_reserve() {
-  local deliv="" cid=""
+  local deliv="" cid="" confirm=0 open_n=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --deliverable) _need_val "passes reserve" --deliverable "$#"; deliv="$2"; shift 2 ;;
       --call-id)     _need_val "passes reserve" --call-id "$#";     cid="$2";  shift 2 ;;
+      --confirm)     confirm=1; shift ;;
+      --open)        _need_val "passes reserve" --open "$#";        open_n="$2"; shift 2 ;;
       *) echo "devflow: passes reserve: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
   _devflow_passes_validate_id "--deliverable" "$deliv"
   _devflow_passes_validate_id "--call-id" "$cid"
+  if [ "$confirm" = 1 ]; then
+    case "$open_n" in ''|*[!0-9]*) echo "devflow: passes reserve: --confirm requires --open <n> (blocking findings open before this fix wave)" >&2; exit 2 ;; esac
+  elif [ -n "$open_n" ]; then
+    echo "devflow: passes reserve: --open is only for --confirm" >&2; exit 2
+  fi
 
   local f mf lock
   f="$(_devflow_passes_file "$deliv")"; mf="$(_devflow_passes_max_file "$deliv")"; lock="$(_devflow_passes_lock_dir "$deliv")"
@@ -730,7 +1011,7 @@ cmd_passes_reserve() {
   touch "$f" 2>/dev/null
 
   local used
-  used="$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')"; used="${used:-0}"
+  used="$(_devflow_passes_used "$f")"
 
   # Re-reserving the same call-id is a no-op EXCEPT when it was already closed (field 3 != "-"):
   # a closed id is a call that already happened and was already charged, so re-dispatching it
@@ -748,6 +1029,27 @@ cmd_passes_reserve() {
     exit 0
   fi
 
+  if [ "$confirm" = 1 ]; then
+    # Only once the budget is really spent — never a free extra pass while budget remains (or when
+    # it is unlimited). Not capped at one: the budget is for full reviews, and a fix wave that
+    # changed the tree is re-reviewed by a confirm round until the no-progress rule stops it.
+    if [ "$max" = "0" ] || [ "$used" -lt "$max" ]; then
+      _devflow_passes_unlock "$lock"; echo "CONFIRM_NOT_NEEDED used=$used max=$max"; exit 4
+    fi
+    local open_cid; open_cid="$(awk -F'\t' -v c="$cid" '$4=="confirm" && $3=="-" && $1!=c{print $1; exit}' "$f" 2>/dev/null)"
+    if [ -n "$open_cid" ]; then
+      _devflow_passes_unlock "$lock"; echo "CONFIRM_STILL_OPEN call-id=$open_cid"; exit 3
+    fi
+    if _devflow_passes_confirm_stalled "$f"; then
+      _devflow_passes_unlock "$lock"
+      echo "CONFIRM_STALLED rounds=$CONFIRM_STALL_ROUNDS no-progress: open blocking findings not reduced"; exit 3
+    fi
+    printf '%s\t%s\t-\tconfirm\t%s\t-\n' "$cid" "$(date +%s)" "$open_n" >> "$f"
+    _devflow_passes_unlock "$lock"
+    echo "CONFIRM_RESERVED call-id=$cid open-before=$open_n"
+    exit 0
+  fi
+
   if [ "$max" != "0" ] && [ "$used" -ge "$max" ]; then
     _devflow_passes_unlock "$lock"
     echo "BUDGET_EXHAUSTED used=$used max=$max"
@@ -762,11 +1064,12 @@ cmd_passes_reserve() {
 }
 
 cmd_passes_close() {
-  local deliv="" cid=""
+  local deliv="" cid="" open_n=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --deliverable) _need_val "passes close" --deliverable "$#"; deliv="$2"; shift 2 ;;
       --call-id)     _need_val "passes close" --call-id "$#";     cid="$2";  shift 2 ;;
+      --open)        _need_val "passes close" --open "$#";        open_n="$2"; shift 2 ;;
       *) echo "devflow: passes close: unknown flag '$1'" >&2; exit 2 ;;
     esac
   done
@@ -782,9 +1085,17 @@ cmd_passes_close() {
     echo "devflow: passes close: no reservation found for call-id '$cid' on deliverable '$deliv'" >&2
     exit 1
   fi
+  # A confirm round must say how many blocking findings are still open after it (progress signal);
+  # an ordinary call takes no --open.
+  local is_confirm; is_confirm="$(awk -F'\t' -v c="$cid" '$1==c{print ($4=="confirm" ? 1 : 0); exit}' "$f")"
+  if [ "$is_confirm" = 1 ]; then
+    case "$open_n" in ''|*[!0-9]*) _devflow_passes_unlock "$lock"; echo "devflow: passes close: confirmation call '$cid' requires --open <n>" >&2; exit 2 ;; esac
+  elif [ -n "$open_n" ]; then
+    _devflow_passes_unlock "$lock"; echo "devflow: passes close: --open is only for confirmation calls" >&2; exit 2
+  fi
   local tmp; tmp="${f}.tmp.$$"
-  awk -F'\t' -v OFS='\t' -v c="$cid" -v ts="$(date +%s)" '
-    $1==c && $3=="-" { $3=ts } { print }
+  awk -F'\t' -v OFS='\t' -v c="$cid" -v ts="$(date +%s)" -v o="$open_n" '
+    $1==c && $3=="-" { $3=ts; if ($4=="confirm") $6=o } { print }
   ' "$f" > "$tmp" && mv "$tmp" "$f"
   _devflow_passes_unlock "$lock"
   exit 0
@@ -802,7 +1113,7 @@ cmd_passes_status() {
 
   local f mf df used max open done_str scope
   f="$(_devflow_passes_file "$deliv")"; mf="$(_devflow_passes_max_file "$deliv")"; df="$(_devflow_passes_done_file "$deliv")"
-  if [ -f "$f" ]; then used="$(wc -l < "$f" | tr -d '[:space:]')"; else used=0; fi
+  if [ -f "$f" ]; then used="$(_devflow_passes_used "$f")"; else used=0; fi
   if [ -f "$mf" ]; then max="$(cat "$mf")"; else max="-"; fi
   if [ -f "$f" ]; then open="$(awk -F'\t' '$3=="-"{print $1}' "$f" | paste -sd, - 2>/dev/null)"; else open=""; fi
   # scope comes from the .done sidecar's own `scope=<digest>` first field (written once by
@@ -815,7 +1126,8 @@ cmd_passes_status() {
   else
     done_str="no"; scope="-"
   fi
-  echo "used=$used max=$max open=$open done=$done_str scope=$scope"
+  local cf=""; [ -f "$f" ] && cf="$(_devflow_passes_confirm "$f")"
+  echo "used=$used max=$max open=$open done=$done_str scope=$scope${cf:+ confirm=$cf}"
   exit 0
 }
 
@@ -841,7 +1153,7 @@ cmd_passes_complete() {
   _devflow_passes_lock "$lock" || { echo "devflow: passes complete: could not acquire the lock for '$deliv' (timed out)" >&2; exit 1; }
   local used open
   if [ -f "$f" ]; then
-    used="$(wc -l < "$f" | tr -d '[:space:]')"
+    used="$(_devflow_passes_used "$f")"
     open="$(awk -F'\t' '$3=="-"{print $1}' "$f" | paste -sd, - 2>/dev/null)"
   else
     used=0; open=""
@@ -865,8 +1177,38 @@ cmd_passes() {
     close)    cmd_passes_close "$@" ;;
     status)   cmd_passes_status "$@" ;;
     complete) cmd_passes_complete "$@" ;;
-    *) echo "usage: $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> [--confirm] | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>" >&2; exit 2 ;;
   esac
+}
+
+# Freezes the "last reviewed state" a confirmation round diffs against. Written ONCE per confirm
+# call (only if absent) BEFORE the confirm dispatch overwrites <phase>-reviewed.gittree: a replay
+# of the same round after an interruption must still see the pre-round state, never
+# current-vs-current (an empty diff that would approve unread fixes). Keyed by deliverable and
+# call-id, so each round starts from the tree the previous round promoted (the diff is always
+# "since the last reviewed tree"), and a later deliverable never inherits it.
+# Prints CONFIRM_BASE=<path>. Exit 0 ok, 1 NO_REVIEWED_TREE (nothing to diff against), 2 usage.
+cmd_confirm_base() {
+  local ph="" del="" fb="" cid=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --phase) _need_val confirm-base --phase "$#"; ph="$2"; shift 2 ;;
+      --deliverable) _need_val confirm-base --deliverable "$#"; del="$2"; shift 2 ;;
+      --call-id) _need_val confirm-base --call-id "$#"; cid="$2"; shift 2 ;;
+      --fallback-phase) _need_val confirm-base --fallback-phase "$#"; fb="$2"; shift 2 ;;
+      *) echo "devflow: confirm-base: unknown flag '$1'" >&2; exit 2 ;;
+    esac
+  done
+  [ -n "$ph" ] && [ -n "$del" ] && [ -n "$cid" ] || { echo "devflow: confirm-base: --phase, --deliverable and --call-id are required" >&2; exit 2; }
+  case "$ph$del$cid$fb" in *[!A-Za-z0-9._-]*) echo "devflow: confirm-base: values must match [A-Za-z0-9._-]*" >&2; exit 2 ;; esac
+  local dst="$RUN_DIR/$ph-confirm-base-$del-$cid.gittree" src=""
+  if [ ! -s "$dst" ]; then
+    [ -s "$RUN_DIR/$ph-reviewed.gittree" ] && src="$RUN_DIR/$ph-reviewed.gittree"
+    [ -z "$src" ] && [ -n "$fb" ] && [ -s "$RUN_DIR/$fb-reviewed.gittree" ] && src="$RUN_DIR/$fb-reviewed.gittree"   # B2
+    [ -n "$src" ] || { echo "NO_REVIEWED_TREE"; exit 1; }
+    cp "$src" "$dst.tmp.$$" && mv -f "$dst.tmp.$$" "$dst" || { rm -f "$dst.tmp.$$"; echo "devflow: confirm-base: cannot write $dst" >&2; exit 2; }
+  fi
+  echo "CONFIRM_BASE=$dst"
 }
 
 # ── preflight (execution profiles: is every bound agent actually usable on this host?) ──────
@@ -1408,7 +1750,10 @@ main() {
     run-external)     cmd_run_external "$@" ;;
     freshness-check)  cmd_freshness_check "$@" ;;
     scope-digest)     cmd_scope_digest "$@" ;;
+    checks)           cmd_checks "$@" ;;
+    gate)             cmd_gate "$@" ;;
     passes)           cmd_passes "$@" ;;
+    confirm-base)     cmd_confirm_base "$@" ;;
     preflight)        cmd_preflight "$@" ;;
     profile-init)     cmd_profile_init "$@" ;;
     deliverable-id)   cmd_deliverable_id "$@" ;;
@@ -1417,8 +1762,11 @@ main() {
       {
         echo "usage: $(basename "$0") dir [--fresh] [--force] [--check-active] (--fresh exit 9 RUN_ACTIVE pid=<n> while a run is live; --force overrides; --check-active is the same lease check without wiping)"
         echo "       $(basename "$0") run-external --backend <codex|claude> --model <m> --effort <e> --phase <p> --prompt-file <f> [--role reviewer|implementer] [--resume <id>] [--no-session-reuse] [--freshness | --freshness-file <path>]"
-        echo "       $(basename "$0") freshness-check --phase <p> [--file <path>] | scope-digest [--base <sha>]"
-        echo "       $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> (exit 2 BUDGET_NOT_INITIALIZED, 3 BUDGET_EXHAUSTED, 9 CALL_ALREADY_CLOSED) | passes close --deliverable <id> --call-id <cid> | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>"
+        echo "       $(basename "$0") freshness-check --phase <p> [--file <path>] | scope-digest [--base <sha>] [--tree-out <file>]"
+        echo "       $(basename "$0") checks run [--config <resolved-config.json>] [--base <sha>] (exit 0 pass, 1 fail, 3 none, 2 INVALID_CHECKS/usage, 4 SNAPSHOT_FAILED)"
+        echo "       $(basename "$0") gate --phase <final-review|impl-review> [--base <sha>] [--fallback-phase <p>] (exit 0 GATE=ok, 1 GATE=blocked + REASON= lines, 2 usage, 4 snapshot failed)"
+        echo "       $(basename "$0") passes init --deliverable <id> --max <n> | passes reserve --deliverable <id> --call-id <cid> [--confirm --open <n>] (exit 2 BUDGET_NOT_INITIALIZED, 3 BUDGET_EXHAUSTED / CONFIRM_STILL_OPEN / CONFIRM_STALLED, 4 CONFIRM_NOT_NEEDED, 9 CALL_ALREADY_CLOSED) | passes close --deliverable <id> --call-id <cid> [--open <n>, confirm only] | passes status --deliverable <id> | passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>"
+        echo "       $(basename "$0") confirm-base --phase <p> --deliverable <d> --call-id <cid> [--fallback-phase <p>] (exit 0 CONFIRM_BASE=<path>, 1 NO_REVIEWED_TREE, 2 usage)"
         echo "       $(basename "$0") preflight --roles-file <path> --host <claude|codex|gemini|cursor|opencode> [--expect-host <h>] [--write-effective <path>] (exit 4 MISSING_AGENT, 5 NO_NAMED_AGENTS, 6 INVALID_PROFILE, 7 HOST_MISMATCH)"
         echo "       $(basename "$0") profile-init --roles-file <path> --host <claude|codex|gemini|cursor|opencode> [--expect-host <h>] (writes profile-active/max-passes/effective-roles.json; same exit codes as preflight, plus 2 for a bad --roles-file)"
         echo "       $(basename "$0") deliverable-id --phase <plan|impl|review> [--plan-path <p>] [--baseline <sha>] (exit 2 NO_IMPL_BASE/NO_BASELINE, 8 DELIVERABLE_CHANGED old=<x> new=<y>)"

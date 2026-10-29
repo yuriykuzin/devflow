@@ -227,9 +227,22 @@ which lens a pass used for the report.
   No `--max` flag any more; it reads the budget `init` already fixed and refuses to run if `init`
   was never called (never defaults to unlimited). The same `--call-id` reserved twice is a no-op,
   never a double charge.
-- `passes close --deliverable <id> --call-id <cid>` — marks a reserved call closed.
+- `passes reserve --deliverable <id> --call-id <cid> --confirm --open <n>` — reserves one
+  diff-only confirmation round that is allowed *outside* the budget once `max_passes` is spent
+  and a fix has not been re-reviewed. `--open <n>` is the number of CONFIRMED + Important findings
+  the fix wave addressed. Rounds are not capped at one: each fix wave gets its own, and each is
+  recorded in the same ledger with a 4th field `confirm` (`cid, ts, -, confirm, open-before, open-after`),
+  which `used` does not count. The runner refuses a round with exit `3` `CONFIRM_STILL_OPEN` while
+  another round is open, and with exit `3` `CONFIRM_STALLED` after two consecutive rounds that did
+  not reduce the open count (the no-progress rule). While budget remains (or is unlimited) it exits
+  `4` `CONFIRM_NOT_NEEDED`, so it can never become a free extra pass. A same-id replay of an open
+  round is a no-op (`0`).
+- `passes close --deliverable <id> --call-id <cid>` — marks a reserved call closed. A confirm
+  round also takes `--open <n>`: the open count after its verdict (this is what the no-progress
+  rule reads). `--open` on an ordinary call, or a confirm without it, exits `2`.
 - `passes status --deliverable <id>` — always exits `0`; prints
-  `used=<u> max=<n|-> open=<call-id,...> done=<yes|no>` (`max=-` when `init` was never called).
+  `used=<u> max=<n|-> open=<call-id,...> done=<yes|no> scope=<digest|->` (`max=-` when `init`
+  was never called), plus a trailing ` confirm=<call-id>` once a confirmation pass was reserved.
 - `passes complete --deliverable <id> --scope <digest> --verdict <clean|blockers>` — writes the
   deliverable's `.done` record once every reservation on it has been closed.
 - `preflight --roles-file <path> --host <host> [--expect-host <h>] [--write-effective <path>]` —
@@ -239,7 +252,9 @@ which lens a pass used for the report.
 - `scope-digest [--base <sha>]` — prints a stable digest of the current working tree (tracked +
   untracked, dirty included), the same content-addressed snapshot the freshness gate already
   trusts. Skills record it as `result.yaml`'s `scope_digest` and pass it to `passes complete
-  --scope`.
+  --scope`. `--tree-out <file>` also writes a git tree object of the working tree (built from a
+  throwaway index; the real index is untouched) — the diff base of a confirmation pass.
+- `checks run` and `gate` — see "Pre-review checks and the DONE gate" below.
 
 | Command | Exit | Meaning |
 |---|---|---|
@@ -249,6 +264,11 @@ which lens a pass used for the report.
 | `passes reserve` | `0` | Reserved, or the same `--call-id` was already reserved (no-op). |
 | `passes reserve` | `2` | `BUDGET_NOT_INITIALIZED` — `passes init` was never called for this deliverable. |
 | `passes reserve` | `3` | `BUDGET_EXHAUSTED used=<u> max=<n>`. |
+| `passes reserve` | `3` | `CONFIRM_STILL_OPEN call-id=<cid>` — another confirmation round is still open. |
+| `passes reserve` | `3` | `CONFIRM_STALLED` — two consecutive confirmation rounds did not reduce the open blocking count. Stop as `NEEDS_USER_DECISION`. |
+| `passes reserve` | `4` | `CONFIRM_NOT_NEEDED` — `--confirm` while budget remains (or is unlimited). |
+| `passes reserve` | `2` | `--confirm` without a digit-only `--open`, or `--open` without `--confirm` (usage). |
+| `passes reserve` | `9` | `--call-id` already closed (replay). |
 | `passes close` | `0` | Closed. |
 | `passes close` | `1` | No reservation found for that deliverable/call-id. |
 | `passes complete` | `0` | `.done` record written. |
@@ -278,18 +298,88 @@ sees which roles fell back and why, never a hidden default.
 - `passes-<deliverable>.tsv` — the reservation ledger: one line per call-id, reserved/closed epoch.
 - `passes-<deliverable>.done` — the completion record written by `passes complete`
   (`scope=<digest> closed=<n> verdict=<clean|blockers> ts=<epoch>`).
+- `checks.txt` — the full log of the last `checks run` (command, output and exit code per check).
+- `checks.status` — one line: `status=<pass|fail|none> digest=<d> base=<b|-> source=<config|discovered> ran=<n> failed=<n>`; written last, which is what `gate` reads.
+- `<phase>-reviewed.digest` — the scope digest recorded at every reviewer dispatch (`impl-review`, `final-review`); `gate` compares the current tree against it.
+- `<phase>-reviewed.gittree` — the git tree object recorded at the same moment (`scope-digest --tree-out`); a confirmation pass diffs against it.
 - `result.yaml` — the result contract (see below), written on every terminal path.
 
 **Defaults leave behaviour unchanged** — with nothing configured, inline or via manifest
 (`roles.*.agent: ""`, `review.max_passes: 0`, `executor_manifest: ""`), devflow's execution is
 identical to before this feature existed — no agent bindings, no pass limit — **except that
-`result.yaml` is now always written on every terminal path** (additive; nothing reads it unless
+`result.yaml` is now always written on every terminal path, and every review round runs the
+project's checks first; `DONE` requires them to pass on the last reviewed tree** (see
+"Pre-review checks and the DONE gate"; `result.yaml` itself is additive, nothing reads it unless
 something chooses to). **To disable a profile**, remove (or blank) the keys you set; there is no
 separate "off" flag because absence already means off.
 
 See [`docs/contracts/`](docs/contracts/) for the full schemas — the executor manifest (L1→L2) and
 the result contract (L2→L1, `$RUN_DIR/result.yaml`) — both versioned, agnostic contracts that any
 execution or process layer may implement.
+
+### Pre-review checks and the DONE gate
+
+Before every review round devflow runs the project's own checks (tests/lint/build), so reviewers
+get the results in their brief and a broken build is never reviewed blind. A run can end `DONE`
+only when the last review read the current tree **and** the checks passed on that same tree; this
+applies on every path, including the default (no profile) one.
+
+The `checks.commands` key (in `~/.devflow/config.yaml` or a project `.devflow.yaml`):
+
+```yaml
+checks:
+  commands: []   # empty = discover from the project; ["true"] = explicit "this project has no checks"
+```
+
+An empty list triggers discovery. Every source that matches is used, in this order, with no dedupe:
+
+1. `test/run.sh` → `bash test/run.sh`
+2. Makefile `test:` / `lint:` targets → `make test` / `make lint`
+3. `package.json` scripts `lint`, `typecheck`, `build`, `test` → `<pnpm|yarn|npm> run <script>`
+   (package manager chosen by lockfile; npm's default `no test specified` placeholder is skipped)
+4. `Gemfile` + `spec/` → `bundle exec rspec`; `Gemfile` + `.rubocop.yml` → `bundle exec rubocop`
+5. `pytest.ini`, or `[tool.pytest` in `pyproject.toml` → `python3 -m pytest`
+
+`$RUN_DIR/checks.txt` records `source=discovered` plus every command it ran. A project with no
+checks sets `checks.commands: ["true"]`: an explicit, visible opt-out. A project `.devflow.yaml`
+may set this key (it is not trust-restricted; discovery already runs repo code).
+
+A check that changes the tree (an autofixing linter, build output that is not git-ignored) fails the
+run, because its own result would describe a tree that no longer exists. `checks.txt` names the
+changed paths; the fix is to add the output to `.gitignore` or revert the autofix. devflow's own
+`output_dir` is excluded from every snapshot (scope digest, `checks run`, `gate`, `--tree-out`), so
+saving a report never changes a digest.
+
+`scripts/devflow-runner.sh checks run [--config <resolved-config.json>] [--base <sha>]` and
+`scripts/devflow-runner.sh gate --phase <final-review|impl-review> [--base <sha>] [--fallback-phase <p>]`:
+
+| Command | Exit | Meaning |
+|---|---|---|
+| `checks run` | `0` | Every check passed (`status=pass`). |
+| `checks run` | `1` | At least one check failed, or a check changed the tree (`status=fail`). |
+| `checks run` | `2` | Usage error, or `INVALID_CHECKS <reason>` — a malformed `checks.commands` is never silently replaced by discovery. |
+| `checks run` | `3` | Nothing configured and nothing discovered (`status=none`). |
+| `checks run` | `4` | `SNAPSHOT_FAILED` — the tree could not be snapshotted, or `checks.status` could not be written. |
+| `gate` | `0` | `GATE=ok` — the last review read the current tree and the checks passed on it. |
+| `gate` | `1` | `GATE=blocked`, with one `REASON=` line per blocker. |
+| `gate` | `2` | Usage error. |
+| `gate` | `4` | The tree could not be snapshotted (`REASON=snapshot-failed`). |
+
+`gate` prints `REVIEWED=<fresh|stale|missing>`, `CHECKS=<pass|fail|none|stale|missing>`, `GATE=<ok|blocked>`,
+then the `REASON=` values:
+
+| `REASON=` | Meaning |
+|---|---|
+| `no-review-recorded` | No reviewer dispatch recorded a digest for this phase. |
+| `unreviewed-changes` | The tree changed after the last review. Needs one more review pass (see the confirmation pass under "Execution profiles"). |
+| `checks-failed` | The checks ran on this tree and failed. |
+| `checks-not-run` | `checks run` found nothing to run (`status=none`). Set `checks.commands: ["true"]` if that is intended. |
+| `checks-stale` | The checks passed, but on another tree or another `--base`. Run them again. |
+| `checks-missing` | `checks run` never completed for this run. |
+| `snapshot-failed` | The tree could not be read (exit `4`). A tool/environment failure, not a content verdict. |
+
+`--fallback-phase <p>` makes `gate` read `<p>`'s review record only when this phase has none (an
+implement round that spent the whole budget means the final review never dispatched).
 
 ### Model Tiers
 
