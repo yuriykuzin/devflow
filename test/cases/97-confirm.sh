@@ -101,6 +101,15 @@ hasnt "$(git -C "$REPO_FX" diff --name-only "$(cat "$SB/t2")" "$(cat "$SB/t3")")
 d4="$( ( cd "$REPO_FX" && bash "$RUNNER" scope-digest --base "$B" --tree-out "$SB/no-such-dir/t" 2>/dev/null ) )"
 ok "printf '%s' '$d4' | grep -Eq '^[0-9a-f]{16}\$'" "--tree-out failure still prints the digest (N2)"
 
+# (12b) core.fsmonitor from the repo config is not run while the tree is built.
+FS="$SB/fsm-repo"; mkdir -p "$FS"
+git -C "$FS" init -q; printf 'x\n' > "$FS/f.txt"
+printf '#!/bin/sh\ntouch "%s/fsm-marker"\n' "$SB" > "$SB/fsm-hook.sh"; chmod +x "$SB/fsm-hook.sh"
+git -C "$FS" add f.txt; git -C "$FS" -c user.name=t -c user.email=t commit -q -m init
+git -C "$FS" config core.fsmonitor "$SB/fsm-hook.sh"
+( cd "$FS" && bash "$RUNNER" scope-digest --tree-out "$SB/t-fsm" ) >/dev/null 2>&1
+ok "[ -s '$SB/t-fsm' ] && [ ! -e '$SB/fsm-marker' ]" "--tree-out does not run the repo's core.fsmonitor hook"
+
 # (13) DG-02/B4: confirm-base is frozen per confirm call, so a replay of the same round after the
 # dispatch overwrote reviewed.gittree still diffs against the PRE-round state (never
 # current-vs-current), and the next round starts from what the previous round promoted.

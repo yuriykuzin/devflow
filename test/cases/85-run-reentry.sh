@@ -96,7 +96,8 @@ step0_resolve_check(){
     cfgc="$(dirname "$RUNNER")/devflow-config.py"
     python3 "$cfgc" resolve --project-root . > "$rd/resolved-config.json"; rrc=$?
     if [ "$rrc" -ne 0 ]; then
-      echo "devflow: could not resolve config at Step 0 (rc=$rrc) -> NEEDS_USER_DECISION. Nothing was wiped; see the resolver's error above." >&2
+      echo "devflow: could not resolve config at Step 0 (rc=$rrc) -> NEEDS_USER_DECISION. Nothing else was wiped; see the resolver's error above." >&2
+      rm -f "$rd/result.yaml"
       exit 1
     fi
     echo "RUN_DIR=$rd"

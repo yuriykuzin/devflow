@@ -94,7 +94,7 @@ codex:
   # The CLI invocation itself is built by the runner — see the canonical procedure in
   # skills/using-devflow/references/cross-tool-runner.md.
   reviewer:
-    model: "gpt-5.6-terra"           # the model devflow reviews WITH when the host is Claude
+    model: "gpt-6.1-terra"           # the model devflow reviews WITH when the host is Claude
     effort: "high"                   # via -c 'model_reasoning_effort="..."'
   implementer:
     model: "gpt-5.5"
