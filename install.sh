@@ -18,7 +18,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$HOME/.codex/devflow"
 DEVFLOW_HOME="$SCRIPT_DIR"
-DEVFLOW_VERSION="0.1.0"
+DEVFLOW_VERSION=""  # set by load_devflow_version from .claude-plugin/plugin.json
 CLAUDE_MKT="devflow-local"
 
 usage() {
@@ -190,6 +190,9 @@ do_deploy() {
     exit 1
   fi
 
+  # Fail on a broken plugin.json before anything is synced or removed.
+  load_devflow_version
+
   mkdir -p "$INSTALL_DIR"
 
   rsync -a --delete \
@@ -199,9 +202,9 @@ do_deploy() {
 
   echo "  ✓ Files synced to $INSTALL_DIR"
 
-  # Remove old installations so re-install points to INSTALL_DIR
+  # Remove the old Codex link so re-install points to INSTALL_DIR. The Claude cache is
+  # kept: do_install copies the new version, repoints the registry, then prunes.
   rm -f "$HOME/.agents/skills/devflow"
-  rm -rf "$HOME/.claude/plugins/cache/$CLAUDE_MKT/devflow" 2>/dev/null || true
 
   DEVFLOW_HOME="$INSTALL_DIR"
   do_install
@@ -229,20 +232,87 @@ symlink_or_skip() {
   echo "  ✓ $label"
 }
 
+# Read the version from .claude-plugin/plugin.json into DEVFLOW_VERSION; exit 1 if it is
+# missing or unsafe (the value ends up in a cache path).
+load_devflow_version() {
+  local manifest="$SCRIPT_DIR/.claude-plugin/plugin.json" version
+  version="$(python3 -c '
+import json, re, sys
+with open(sys.argv[1]) as f:
+    version = json.load(f)["version"]
+# Validate the raw string: $(...) would strip a trailing newline before bash sees it.
+print(version if isinstance(version, str) and re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]*", version) else "")
+' "$manifest" 2>/dev/null)" || version=""
+  if ! [[ "$version" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+    echo "  ✗ no valid \"version\" in $manifest" >&2
+    exit 1
+  fi
+  DEVFLOW_VERSION="$version"
+}
+
+# Run py_code against the JSON file's contents as `data`, then write it back atomically
+# (temp file in the real file's directory + os.replace). Symlinks and modes are kept.
+# The py_code output is shown only after the write succeeded.
 json_set() {
   local file="$1" py_code="$2"
   python3 -c "
-import json, sys
+import io, json, os, shutil, sys, tempfile
+path = os.path.realpath(sys.argv[1])
 try:
-    with open('$file', 'r') as f:
+    with open(path, 'r') as f:
         data = json.load(f)
 except (FileNotFoundError, json.JSONDecodeError):
     data = {}
+real_stdout, sys.stdout = sys.stdout, io.StringIO()
 $py_code
-with open('$file', 'w') as f:
-    json.dump(data, f, indent=2)
-    f.write('\n')
-" 2>/dev/null
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.json_set.')
+try:
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    if os.path.exists(path):
+        shutil.copymode(path, tmp)
+    else:
+        os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    raise
+real_stdout.write(sys.stdout.getvalue())
+" "$file" 2>/dev/null
+}
+
+# Print the installPath of every entry of plugin key $2 in registry file $1, one per line
+# (trailing slash dropped). Fails if the registry cannot be read.
+registry_install_paths() {
+  python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    entries = json.load(f).get("plugins", {}).get(sys.argv[2]) or []
+for entry in entries:
+    if isinstance(entry, dict) and entry.get("installPath"):
+        print(entry["installPath"].rstrip("/"))
+' "$1" "$2"
+}
+
+# Remove version dirs under cache dir $1 that are neither $2 (the current one) nor an
+# installPath of any registry entry for key $4 in registry file $3.
+prune_old_versions() {
+  local cache_dir="$1" keep_dir="$2" registry_file="$3" plugin_key="$4"
+  local registered dir
+  registered="$(registry_install_paths "$registry_file" "$plugin_key" 2>/dev/null)" || {
+    echo "  ⚠ could not re-read registry — old versions not pruned"
+    return 0
+  }
+  for dir in "$cache_dir"/*/; do
+    [ -d "$dir" ] || continue
+    dir="${dir%/}"
+    [ "$dir" = "$keep_dir" ] && continue
+    grep -qxF -- "$dir" <<< "$registered" && continue
+    rm -rf "$dir" || { echo "  ⚠ could not prune $(basename "$dir")"; continue; }
+    echo "  ✓ pruned old version $(basename "$dir")"
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -250,6 +320,7 @@ with open('$file', 'w') as f:
 # ---------------------------------------------------------------------------
 
 do_install() {
+  load_devflow_version
   echo "Devflow — installing from $DEVFLOW_HOME"
   echo ""
 
@@ -334,10 +405,13 @@ else:
       if [ -f "$installed_file" ]; then
         local ts
         ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-        json_set "$installed_file" "
+        # Every entry of the key is repointed (the cache is a working-tree copy, so a
+        # stale gitCommitSha is dropped); a missing or empty key gets one user entry.
+        if json_set "$installed_file" "
 key = '$plugin_key'
-if key not in data.get('plugins', {}):
-    data.setdefault('plugins', {})[key] = [{
+plugins = data.setdefault('plugins', {})
+if not plugins.get(key):
+    plugins[key] = [{
         'scope': 'user',
         'installPath': '$plugin_dir',
         'version': '$DEVFLOW_VERSION',
@@ -346,8 +420,18 @@ if key not in data.get('plugins', {}):
     }]
     print('  ✓ registered in installed_plugins.json')
 else:
-    print('  ✓ already registered')
-" || echo "  ⚠ could not register plugin"
+    for entry in plugins[key]:
+        entry['installPath'] = '$plugin_dir'
+        entry['version'] = '$DEVFLOW_VERSION'
+        entry['lastUpdated'] = '$ts'
+        entry.pop('gitCommitSha', None)
+    print('  ✓ registry updated in installed_plugins.json')
+"; then
+          # Registry now points at plugin_dir: safe to drop versions nothing references.
+          prune_old_versions "$cache_dir" "$plugin_dir" "$installed_file" "$plugin_key"
+        else
+          echo "  ⚠ could not register plugin"
+        fi
       fi
 
       # Enable in settings.json
@@ -511,17 +595,15 @@ do_status() {
   fi
 
   # Claude Code
+  load_devflow_version
   local plugin_dir="$HOME/.claude/plugins/cache/$CLAUDE_MKT/devflow/$DEVFLOW_VERSION"
+  local installed_file="$HOME/.claude/plugins/installed_plugins.json"
+  local plugin_key="devflow@$CLAUDE_MKT"
+  local registered="" reg_path
+  [ -f "$installed_file" ] && registered="$(registry_install_paths "$installed_file" "$plugin_key" 2>/dev/null)" || true
   if [ -d "$plugin_dir" ]; then
     echo "  ✓ Claude Code: $plugin_dir"
-    local installed_file="$HOME/.claude/plugins/installed_plugins.json"
-    local plugin_key="devflow@$CLAUDE_MKT"
-    if [ -f "$installed_file" ] && python3 -c "
-import json
-with open('$installed_file') as f:
-    d = json.load(f)
-assert '$plugin_key' in d.get('plugins', {})
-" 2>/dev/null; then
+    if [ -n "$registered" ]; then
       echo "               registered as $plugin_key"
     else
       echo "               ⚠ cached but not registered"
@@ -529,6 +611,12 @@ assert '$plugin_key' in d.get('plugins', {})
   else
     echo "  ✗ Claude Code: not installed"
   fi
+  # Independent of the current version dir: a registry entry may point somewhere gone.
+  while IFS= read -r reg_path; do
+    if [ -n "$reg_path" ] && [ ! -d "$reg_path" ]; then
+      echo "               ⚠ registry points to missing $reg_path"
+    fi
+  done <<< "$registered"
 
   # opencode
   local oc_dir="$HOME/.config/opencode/skills" oc_n=0

@@ -46,6 +46,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unless Phase 3 was skipped).
 - No edits after the final review round: the prose wording pass moves into the last fix wave.
 
+### Fixed
+
+- **Breaking:** config quoted scalars now follow YAML. In double quotes `\\`, `\"`, `\n`, `\t`,
+  `\xHH`, `\uHHHH`, `\UHHHHHHHH` and the other YAML escapes are decoded (`"^(a|\\.b)/"` is
+  `^(a|\.b)/`), and an escaped `\"` no longer ends the value or hides a `#`. In single quotes `''` is
+  one `'`. A double-quoted value with an invalid escape (`"C:\Users"`, `"\d+"`) or a quoted value
+  that is unterminated or has text after the closing quote now fails with a located error: use
+  single quotes for regexes and Windows paths. Keep `codex.command_path` unquoted, or
+  double-quoted with no backslashes and no ` #` (the runner's own reader strips only double quotes
+  and does no unescaping). A string profile field emitted by `devflow-config.py fields` that
+  contains a control character (such as a newline from `\n`) is rejected as `INVALID_PROFILE`
+  (exit `6`), so a project `.devflow.yaml` cannot inject extra `key=value` lines. A config that
+  no longer parses now stops every phase with a located error instead of running without the
+  execution profile.
+- `install.sh` reads the version from `.claude-plugin/plugin.json` instead of a hardcoded value,
+  and keeps `installed_plugins.json` and the plugin cache consistent: every `devflow@devflow-local`
+  entry gets the new `installPath`/`version` (a stale `gitCommitSha` is dropped), the registry is
+  written atomically, `--deploy` no longer deletes the cache before installing, old version
+  directories are pruned only after the registry points at the new one, and `--status` warns
+  about a registry path missing on disk.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added

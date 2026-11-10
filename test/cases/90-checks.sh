@@ -51,6 +51,12 @@ out="$(c --config "$SB/bad.json")"; rc=$?
 is "$rc" "2" "non-list checks.commands -> exit 2"
 has "$out" "INVALID_CHECKS" "...with an INVALID_CHECKS line"
 has "$(st)" "status=fail" "...and the last real status is untouched"
+printf '{"checks":{"commands":["echo hi\\rrm"]}}' > "$SB/cr.json"
+out="$(c --config "$SB/cr.json")"; rc=$?
+is "$rc" "2" "a command with a control character (\\r) -> exit 2"
+printf '{"checks":{"commands":["echo a\\tb"]}}' > "$SB/tab.json"
+out="$(c --config "$SB/tab.json")"; rc=$?
+is "$rc" "0" "a command with a tab is accepted -> exit 0"
 
 # (6) a check that forges its own pass is overwritten by the real outcome.
 jcfg "$SB/forge.json" "echo 'status=pass digest=x base=- source=config ran=1 failed=0' > '$RUN_DIR/checks.status'; exit 1"

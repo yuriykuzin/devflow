@@ -700,8 +700,8 @@ if not isinstance(c, dict):
 cmds = c.get("commands")
 if cmds is None:
     cmds = []
-if not isinstance(cmds, list) or not all(isinstance(x, str) and x.strip() and "\n" not in x for x in cmds):
-    print("INVALID_CHECKS checks.commands must be a list of non-empty one-line strings"); sys.exit(2)
+if not isinstance(cmds, list) or not all(isinstance(x, str) and x.strip() and not any((ord(ch) < 0x20 and ch != "\t") or ord(ch) == 0x7F for ch in x) for x in cmds):
+    print("INVALID_CHECKS checks.commands must be a list of non-empty one-line strings without control characters"); sys.exit(2)
 for x in cmds:
     print(x)
 ' "$1"

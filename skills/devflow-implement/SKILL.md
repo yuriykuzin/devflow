@@ -104,8 +104,9 @@ if [ "$RRC" -eq 6 ]; then
   # STOP: write result.yaml per "Finalize" (Step 7) with status NEEDS_USER_DECISION, then exit.
   exit 1
 elif [ "$RRC" -ne 0 ]; then
-  # No profile keys / no manifest declared — not an error, nothing to init. Default path.
-  echo off > "$RUN_DIR/profile-active"
+  echo "devflow: could not resolve config (rc=$RRC) -> NEEDS_USER_DECISION; see the resolver's error above." >&2
+  # STOP: write result.yaml per "Finalize" (Step 7) with status NEEDS_USER_DECISION, then exit.
+  exit 1
 else
   bash "$RUNNER" profile-init --roles-file "$RUN_DIR/resolved-config.json" --host "$HOST" \
     > "$RUN_DIR/profile-init-out.txt" 2>&1
