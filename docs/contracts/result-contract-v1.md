@@ -72,6 +72,13 @@ tool/environment failure, not a content verdict) lives at
   re-review-skippable later is `devflow-runner.sh passes complete --deliverable <id> --scope
   <digest>` having been called at the end of that pass — not whether an external call happened.
   An example lives at `docs/contracts/examples/result.internal-only.example.yaml`.
+- **`DONE` means the final tree was reviewed and checked** (implementation and code-review
+  deliverables only; plan-artifact completion is unchanged, DECISION-contract-scope): a producer
+  of such a deliverable reports `DONE` only when the last review pass read the tree being reported (no edit after it), and the project's checks
+  (tests/lint/build) passed on that same tree. Otherwise the status is `NEEDS_USER_DECISION`,
+  with the reason in `blockers` (devflow uses ids `GATE-unreviewed-changes`,
+  `GATE-checks-failed`, `GATE-checks-not-run`, ...). The checks log is listed in `evidence`
+  with kind `tests`.
 
 ## Producer / consumer
 

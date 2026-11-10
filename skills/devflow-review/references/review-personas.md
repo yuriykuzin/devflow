@@ -63,8 +63,7 @@ does **not** re-enter the fix → re-review loop. Personas review **code and obs
 when a changeset is code plus a companion doc, the code is the loop's subject and the doc gets a
 single accuracy pass at the end.
 
-- A wrong or over-reaching claim in prose is a **non-blocking** nit, fixed in one final wording
-  pass — never a blocker that spins another round.
+- A wrong or over-reaching claim in prose is a **non-blocking** nit, fixed in one wording pass folded into the last fix wave (so the final review round reads it) — never a blocker that spins another round. Nothing is edited after the final round.
 - **Do not generate an unmeasured claim** while reviewing prose: no "only", no counts, no
   line-number lists about a library or the codebase unless you measured it *this* round. If you
   cannot verify it, omit it or report it as unverified — never raise it as a blocker or as

@@ -109,11 +109,16 @@ def _strip_comment(line):
     """Cut a line at the first '#' that is not inside a quoted string."""
     out = []
     quote = None
+    escaped = False
     at_value_start = True
     for ch in line:
         if quote:
             out.append(ch)
-            if ch == quote:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
                 quote = None
             continue
         if at_value_start and ch in ("'", '"'):
@@ -136,10 +141,15 @@ def _split_kv(text):
     """Split 'key: rest' on the first ':' that is not inside quotes/flow braces/brackets."""
     depth = 0
     quote = None
+    escaped = False
     at_value_start = True
     for i, ch in enumerate(text):
         if quote:
-            if ch == quote:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
                 quote = None
             continue
         if at_value_start and ch in ("'", '"'):
@@ -168,10 +178,73 @@ _BOOL_TRUE = ("true", "yes", "on")
 _BOOL_FALSE = ("false", "no", "off")
 
 
+# YAML 1.2 single-character double-quote escapes (`\xHH`, `\uHHHH`, `\UHHHHHHHH` are separate).
+_SIMPLE_ESCAPES = {
+    "0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v",
+    "f": "\f", "r": "\r", "e": "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\",
+    "N": "\x85", "_": "\xa0", "L": "\u2028", "P": "\u2029",
+}
+_HEX_ESCAPE_DIGITS = {"x": 2, "u": 4, "U": 8}
+
+
+def _hex_escape(body, i):
+    """Decode the `\\x`/`\\u`/`\\U` escape whose letter is body[i]; returns (char, next_i)."""
+    width = _HEX_ESCAPE_DIGITS[body[i]]
+    digits = body[i + 1 : i + 1 + width]
+    if len(digits) != width or not all(c in "0123456789abcdefABCDEF" for c in digits):
+        raise ValueError(
+            f"invalid escape '\\{body[i]}{digits}' in quoted scalar "
+            "(use single quotes for regexes and Windows paths)"
+        )
+    code = int(digits, 16)
+    if code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
+        raise ValueError(
+            f"invalid escape '\\{body[i]}{digits}' in quoted scalar (not a Unicode scalar) "
+            "(use single quotes for regexes and Windows paths)"
+        )
+    return chr(code), i + 1 + width
+
+
+def _unquote(s):
+    """Decode a quoted scalar: it must end with its own unescaped closing quote, nothing after."""
+    quote = s[0]
+    out = []
+    i = 1
+    while i < len(s):
+        ch = s[i]
+        if ch == quote:
+            if quote == "'" and s[i + 1 : i + 2] == "'":
+                out.append("'")
+                i += 2
+                continue
+            if i == len(s) - 1:
+                return "".join(out)
+            break
+        if quote == '"' and ch == "\\":
+            if i + 1 >= len(s):
+                break
+            esc = s[i + 1]
+            if esc in _HEX_ESCAPE_DIGITS:
+                decoded, i = _hex_escape(s, i + 1)
+                out.append(decoded)
+                continue
+            if esc not in _SIMPLE_ESCAPES:
+                raise ValueError(
+                    f"invalid escape '\\{esc}' in quoted scalar {s!r} "
+                    "(use single quotes for regexes and Windows paths)"
+                )
+            out.append(_SIMPLE_ESCAPES[esc])
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    raise ValueError(f"unterminated quoted scalar (or text after the closing quote): {s!r}")
+
+
 def _parse_scalar(s):
     s = s.strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-        return s[1:-1]
+    if s[:1] in ("'", '"'):
+        return _unquote(s)
     if s == "":
         return ""
     low = s.lower()
@@ -197,12 +270,17 @@ def _split_flow_items(inner):
     items = []
     depth = 0
     quote = None
+    escaped = False
     at_value_start = True
     cur = []
     for ch in inner:
         if quote:
             cur.append(ch)
-            if ch == quote:
+            if escaped:
+                escaped = False
+            elif quote == '"' and ch == "\\":
+                escaped = True
+            elif ch == quote:
                 quote = None
             continue
         if at_value_start and ch in ("'", '"'):
@@ -632,11 +710,19 @@ def cmd_fields(argv):
         (("review", "fallback_to_host"), False),
         (("_manifest", "host"), ""),
     ]
+    lines = []
     for path_tuple, default in fields:
         value = _get_path(cfg, path_tuple, default)
         if isinstance(value, bool):
             value = "true" if value else "false"
-        print(f"{'.'.join(path_tuple)}={value}")
+        key = ".".join(path_tuple)
+        # The runner reads these lines with `while read` (last value wins): a control character
+        # (e.g. a decoded `\n`) in a value could smuggle in a second `key=value` line.
+        if isinstance(value, str) and any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+            print(f"INVALID_PROFILE {key}={value!r} contains a control character")
+            return 6
+        lines.append(f"{key}={value}")
+    print("\n".join(lines))
     return 0
 
 

@@ -6,6 +6,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `checks.commands` config key and `scripts/devflow-runner.sh checks run [--config <json>] [--base <sha>]`:
+  runs the project's tests/lint/build before every review round (empty list = discover from
+  `test/run.sh`, Makefile, `package.json`, rspec/rubocop, pytest) and saves
+  `$RUN_DIR/checks.txt` (output + exit codes) and `$RUN_DIR/checks.status`. Exit `0` pass, `1` fail,
+  `3` none, `2` `INVALID_CHECKS`, `4` `SNAPSHOT_FAILED`. A check that changes the tree fails, and
+  `checks.txt` names the changed paths.
+- `scripts/devflow-runner.sh gate --phase <p> [--base <sha>]`: `GATE=ok` only when the last
+  review read the current tree and the checks passed on it; otherwise `GATE=blocked` with
+  `REASON=` lines (exit `1`), `4` on a snapshot failure. `--fallback-phase <p>` reads `<p>`'s review record when this
+  phase has none.
+- Every snapshot (scope digest, gate, checks, `--tree-out`) excludes devflow's own `output_dir`,
+  so saving a report never changes a digest. `scripts/devflow-runner.sh confirm-base` freezes the
+  diff base of a confirmation pass once, so a replay after compaction cannot approve unread fixes.
+- Finding verifier (`skills/devflow-review/references/finding-verifier.md`): after the reviewers
+  return, one read-only sub-agent re-checks each finding at its file:line (CONFIRMED /
+  NOT_REPRODUCED; Important / Nit / Pre-existing, the last only with evidence the behaviour
+  existed at the base, not by `git blame` alone). Only CONFIRMED + Important findings block;
+  the rest are listed in "Not actioned" with a new `Verifier` column. Review and implement only.
+
+### Changed
+
+- A run ends `DONE` only when `gate` exits `0`, on every path including the default (no profile)
+  one. A fix after the last review needs one more review pass. With `review.max_passes` spent,
+  that is a diff-only confirmation round outside the budget (`passes reserve --confirm --open <n>`:
+  one per fix wave, not capped, recorded in the pass ledger but not counted in `used`; `4`
+  `CONFIRM_NOT_NEEDED` while budget remains). The run ends `NEEDS_USER_DECISION`
+  (`GATE-unreviewed-changes`) only on `CONFIRM_STALLED`: two consecutive rounds that did not
+  reduce the open blocking count. A budget never blocks re-review of real fixes.
+  Projects with no checks opt out with `checks.commands: ["true"]`.
+- `scope-digest --tree-out <file>` also records a git tree object of the working tree (throwaway
+  index; real index untouched; a failure warns and keeps the digest). Each reviewer dispatch writes
+  `$RUN_DIR/<phase>-reviewed.gittree`, which the confirmation pass diffs against.
+- The reviewed digest is recorded at every reviewer dispatch (internal and external), not only
+  the external call. `$RUN_DIR/impl-reviewed.digest` is renamed `impl-review-reviewed.digest`.
+- devflow-run's `revision_reviewed` now comes from the phase that reviewed last (`final-review`
+  unless Phase 3 was skipped).
+- No edits after the final review round: the prose wording pass moves into the last fix wave.
+
+### Fixed
+
+- **Breaking:** config quoted scalars now follow YAML. In double quotes `\\`, `\"`, `\n`, `\t`,
+  `\xHH`, `\uHHHH`, `\UHHHHHHHH` and the other YAML escapes are decoded (`"^(a|\\.b)/"` is
+  `^(a|\.b)/`), and an escaped `\"` no longer ends the value or hides a `#`. In single quotes `''` is
+  one `'`. A double-quoted value with an invalid escape (`"C:\Users"`, `"\d+"`) or a quoted value
+  that is unterminated or has text after the closing quote now fails with a located error: use
+  single quotes for regexes and Windows paths. Keep `codex.command_path` unquoted, or
+  double-quoted with no backslashes and no ` #` (the runner's own reader strips only double quotes
+  and does no unescaping). A string profile field emitted by `devflow-config.py fields` that
+  contains a control character (such as a newline from `\n`) is rejected as `INVALID_PROFILE`
+  (exit `6`), so a project `.devflow.yaml` cannot inject extra `key=value` lines. A config that
+  no longer parses now stops every phase with a located error instead of running without the
+  execution profile.
+- `install.sh` reads the version from `.claude-plugin/plugin.json` instead of a hardcoded value,
+  and keeps `installed_plugins.json` and the plugin cache consistent: every `devflow@devflow-local`
+  entry gets the new `installPath`/`version` (a stale `gitCommitSha` is dropped), the registry is
+  written atomically, `--deploy` no longer deletes the cache before installing, old version
+  directories are pruned only after the registry points at the new one, and `--status` warns
+  about a registry path missing on disk.
+
 ## [0.2.0] - 2026-09-24
 
 ### Added

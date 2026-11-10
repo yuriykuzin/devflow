@@ -234,6 +234,39 @@ or `..` (it is a filename component); a missing `--phase`, an unknown flag, a `-
 wrong snapshot. `--freshness` on a repo it cannot read exits 1 rather than recording an empty
 snapshot.
 
+### `checks run [--config <resolved-config.json>] [--base <sha>]`
+
+Answers: do the project's tests/lint/build pass on the tree as it is now? Runs `checks.commands`
+(or, when the list is empty, the commands discovered from `test/run.sh`, Makefile, `package.json`,
+rspec/rubocop, pytest), writes the full log to `$RUN_DIR/checks.txt` and a one-line outcome to
+`$RUN_DIR/checks.status` (written last; it carries the tree digest the checks ran on). Every command
+runs even after a failure. A check that changes the tree fails the run, and `checks.txt` names the
+changed paths. Launch `checks run` like `run-external`: `run_in_background: true` on Claude Code.
+
+| Exit | stdout | Meaning |
+|------|--------|---------|
+| 0 | | every check passed (`status=pass`) |
+| 1 | | a check failed, or a check changed the tree (`status=fail`) |
+| 2 | `INVALID_CHECKS <reason>` | malformed `checks.commands`, or a usage error; never silently falls back to discovery |
+| 3 | | nothing configured and nothing discovered (`status=none`) |
+| 4 | `SNAPSHOT_FAILED` | the tree could not be snapshotted, or `checks.status` could not be written |
+
+### `gate --phase <final-review|impl-review> [--base <sha>] [--fallback-phase <p>]`
+
+Answers: may this phase end `DONE`? Only when the current tree equals the digest recorded at the
+last reviewer dispatch (`$RUN_DIR/<phase>-reviewed.digest`) **and** `checks.status` says `pass` for
+that same tree and base. Prints `REVIEWED=<fresh|stale|missing>`, `CHECKS=<pass|fail|none|stale|missing>`,
+`GATE=<ok|blocked>`, then one `REASON=` line per blocker (`no-review-recorded`, `unreviewed-changes`,
+`checks-failed`, `checks-not-run`, `checks-stale`, `checks-missing`). `--fallback-phase <p>` reads
+`<p>`'s review record only when this phase has none.
+
+| Exit | stdout | Meaning |
+|------|--------|---------|
+| 0 | `GATE=ok` | reviewed and checked on the current tree |
+| 1 | `GATE=blocked` + `REASON=` lines | at least one blocker; do not report `DONE` |
+| 2 | | usage error |
+| 4 | `GATE=blocked` `REASON=snapshot-failed` | the tree could not be read; a tool/environment failure |
+
 ## Config: what to read, and pass as flags
 
 Read the merged config once at the start of a skill and carry the values into your
