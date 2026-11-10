@@ -29,6 +29,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The default codex reviewer model is now `gpt-6.1-terra`. Pytest discovery picks
+  `uv run --frozen pytest` or `poetry run pytest` from the lockfile.
 - A run ends `DONE` only when `gate` exits `0`, on every path including the default (no profile)
   one. A fix after the last review needs one more review pass. With `review.max_passes` spent,
   that is a diff-only confirmation round outside the budget (`passes reserve --confirm --open <n>`:
@@ -48,6 +50,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The confirmation diff ignores external diff, textconv, colour and submodule-hiding config; the
+  worktree tree build ignores fsmonitor. Config-resolve stops remove a stale `result.yaml`.
 - **Breaking:** config quoted scalars now follow YAML. In double quotes `\\`, `\"`, `\n`, `\t`,
   `\xHH`, `\uHHHH`, `\UHHHHHHHH` and the other YAML escapes are decoded (`"^(a|\\.b)/"` is
   `^(a|\.b)/`), and an escaped `\"` no longer ends the value or hides a `#`. In single quotes `''` is

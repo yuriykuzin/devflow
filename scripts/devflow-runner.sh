@@ -662,12 +662,13 @@ _devflow_worktree_tree() {
   rm -f "$idx"
   (
     cd "$DEVFLOW_PROJECT_ROOT" || exit 1
-    if git rev-parse -q --verify HEAD >/dev/null; then GIT_INDEX_FILE="$idx" git read-tree HEAD || exit 1
-    else GIT_INDEX_FILE="$idx" git read-tree --empty || exit 1; fi
+    if git -c core.fsmonitor= rev-parse -q --verify HEAD >/dev/null; then
+      GIT_INDEX_FILE="$idx" git -c core.fsmonitor= read-tree HEAD || exit 1
+    else GIT_INDEX_FILE="$idx" git -c core.fsmonitor= read-tree --empty || exit 1; fi
     # Same pathspec as the digest snapshot (Task 1b): devflow's own output_dir is never in a tree.
     ex="$(_devflow_snapshot_exclude "$(git rev-parse --show-toplevel)")"
-    GIT_INDEX_FILE="$idx" git add -A -- . ${ex:+"$ex"} >/dev/null || exit 1
-    GIT_INDEX_FILE="$idx" git write-tree
+    GIT_INDEX_FILE="$idx" git -c core.fsmonitor= add -A -- . ${ex:+"$ex"} >/dev/null || exit 1
+    GIT_INDEX_FILE="$idx" git -c core.fsmonitor= write-tree
   ); rc=$?
   rm -f "$idx"
   return $rc
@@ -735,7 +736,9 @@ for k in ("lint", "typecheck", "build", "test"):
     [ -f "$root/.rubocop.yml" ] && echo "bundle exec rubocop"
   fi
   if [ -f "$root/pytest.ini" ] || grep -q '^\[tool\.pytest' "$root/pyproject.toml" 2>/dev/null; then
-    echo "python3 -m pytest"
+    if [ -f "$root/uv.lock" ]; then echo "uv run --frozen pytest"
+    elif [ -f "$root/poetry.lock" ]; then echo "poetry run pytest"
+    else echo "python3 -m pytest"; fi
   fi
   return 0
 }

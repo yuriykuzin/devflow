@@ -110,7 +110,7 @@ Devflow uses different model tiers for different tasks. Defaults depend on backe
 
 | Role | claude backend | codex backend | Purpose |
 |------|---------------|---------------|----------|
-| **Reviewer** | opus / max | gpt-5.5 / high | Thorough plan and code reviews |
+| **Reviewer** | opus / max | gpt-6.1-terra / high | Thorough plan and code reviews |
 | **Implementer** | sonnet / high | gpt-5.5 / high | Fast, capable code generation |
 | **Orchestrator** | (your model) | (your model) | You — the host agent |
 

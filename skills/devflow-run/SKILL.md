@@ -116,7 +116,9 @@ CFGC="$(dirname "$RUNNER")/devflow-config.py"
 # rc==6 case takes further down — this is that same failure, caught before it can do damage.
 python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RESOLVE_RC=$?
 if [ "$RESOLVE_RC" -ne 0 ]; then
-  echo "devflow: could not resolve config at Step 0 (rc=$RESOLVE_RC) -> NEEDS_USER_DECISION. Nothing was wiped; see the resolver's error above." >&2
+  echo "devflow: could not resolve config at Step 0 (rc=$RESOLVE_RC) -> NEEDS_USER_DECISION. Nothing else was wiped; see the resolver's error above." >&2
+  # STOP: remove the stale result, then write result.yaml per Finalize (Step 4) with status NEEDS_USER_DECISION, then exit.
+  rm -f "$RUN_DIR/result.yaml"
   exit 1
 fi
 PROFILE_ACTIVE=0
@@ -280,13 +282,15 @@ HOST=claude   # <- set this to the tool actually executing this skill (claude|co
 python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RRC=$?
 if [ "$RRC" -eq 6 ]; then
   echo "devflow: invalid execution profile in resolved config -> NEEDS_USER_DECISION" >&2
-  # STOP: write result.yaml per "Finalize" (Step 4) with status NEEDS_USER_DECISION, then exit.
+  # STOP: remove the stale result, then write result.yaml per "Finalize" (Step 4) with status NEEDS_USER_DECISION, then exit.
   rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"   # Step 0 already created these above; a crash here must not leak either into the next feature's run (F2)
+  rm -f "$RUN_DIR/result.yaml"
   exit 1
 elif [ "$RRC" -ne 0 ]; then
   echo "devflow: could not resolve config (rc=$RRC) -> NEEDS_USER_DECISION; see the resolver's error above." >&2
-  # STOP: write result.yaml per "Finalize" (Step 4) with status NEEDS_USER_DECISION, then exit.
+  # STOP: remove the stale result, then write result.yaml per "Finalize" (Step 4) with status NEEDS_USER_DECISION, then exit.
   rm -f "$RUN_DIR/pipeline" "$RUN_DIR/feature-key"   # Step 0 already created these above; a crash here must not leak either into the next feature's run (F2)
+  rm -f "$RUN_DIR/result.yaml"
   exit 1
 else
   bash "$RUNNER" profile-init --roles-file "$RUN_DIR/resolved-config.json" --host "$HOST" \

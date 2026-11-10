@@ -97,6 +97,13 @@ hasnt "$list" "run test" "discovery: npm's 'no test specified' placeholder is sk
 has "$list" "bundle exec rspec" "discovery: Gemfile + spec/"
 has "$list" "bundle exec rubocop" "discovery: Gemfile + .rubocop.yml"
 has "$list" "python3 -m pytest" "discovery: [tool.pytest] in pyproject.toml"
+for lock in uv poetry; do
+  P="$SB/py-$lock"; mkdir -p "$P"
+  printf '[tool.pytest.ini_options]\n' > "$P/pyproject.toml"; : > "$P/$lock.lock"
+  hasnt "$( . "$RUNNER"; _devflow_checks_discover "$P" )" "python3 -m pytest" "discovery: $lock.lock replaces python3 -m pytest"
+done
+has "$( . "$RUNNER"; _devflow_checks_discover "$SB/py-uv" )" "uv run --frozen pytest" "discovery: uv.lock -> uv run --frozen pytest"
+has "$( . "$RUNNER"; _devflow_checks_discover "$SB/py-poetry" )" "poetry run pytest" "discovery: poetry.lock -> poetry run pytest"
 
 # (10) usage errors.
 ( cd "$REPO_FX" && bash "$RUNNER" checks bogus ) >/dev/null 2>&1; is "$?" "2" "unknown checks subcommand -> exit 2"

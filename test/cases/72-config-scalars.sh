@@ -63,7 +63,8 @@ is "$(got 't: a\\b' 'c["t"]')" 'a\\b' 'unquoted a\\b stays a\\b'
 # (7) invalid / unterminated quoting is a located error.
 located_error 'invalid escape "\q"' 'backend: x
 t: "\q"' 2
-located_error 'unterminated "abc\q' 't: "abc\q' 1
+located_error 'unterminated "abc' 't: "abc' 1
+has "$(cat "$TD/err.txt")" "unterminated" "...stderr says unterminated"
 located_error 'escaped final quote "a\"' 't: "a\"' 1
 located_error 'text after the closing quote "a" b' 't: "a" b' 1
 

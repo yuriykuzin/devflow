@@ -67,7 +67,9 @@ CFGC="$(dirname "$RUNNER")/devflow-config.py"
 # to the wipe below. Stderr stays visible so the user sees why.
 python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RESOLVE_RC=$?
 if [ "$RESOLVE_RC" -ne 0 ]; then
-  echo "devflow: could not resolve config at Step 1 (rc=$RESOLVE_RC) -> NEEDS_USER_DECISION. Nothing was wiped; see the resolver's error above." >&2
+  echo "devflow: could not resolve config at Step 1 (rc=$RESOLVE_RC) -> NEEDS_USER_DECISION. Nothing else was wiped; see the resolver's error above." >&2
+  # STOP: remove the stale result, then write result.yaml per Finalize (Step 6) with status NEEDS_USER_DECISION, then exit.
+  rm -f "$RUN_DIR/result.yaml"
   exit 1
 fi
 PROFILE_ACTIVE=0
@@ -145,13 +147,15 @@ HOST=claude   # <- set this to the tool actually executing this skill (claude|co
 python3 "$CFGC" resolve --project-root . > "$RUN_DIR/resolved-config.json"; RRC=$?
 if [ "$RRC" -eq 6 ]; then
   echo "devflow: invalid execution profile in resolved config -> NEEDS_USER_DECISION" >&2
-  # STOP the phase: write result.yaml per Finalize (Step 6) with status NEEDS_USER_DECISION,
+  # STOP the phase: remove the stale result, then write result.yaml per Finalize (Step 6) with status NEEDS_USER_DECISION,
   # blockers: [{summary: invalid profile}], then exit — do not silently continue unbound.
+  rm -f "$RUN_DIR/result.yaml"
   exit 1
 elif [ "$RRC" -ne 0 ]; then
   echo "devflow: could not resolve config (rc=$RRC) -> NEEDS_USER_DECISION; see the resolver's error above." >&2
-  # STOP the phase: write result.yaml per Finalize (Step 6) with status NEEDS_USER_DECISION,
+  # STOP the phase: remove the stale result, then write result.yaml per Finalize (Step 6) with status NEEDS_USER_DECISION,
   # blockers: [{summary: config unparseable}], then exit — do not silently continue unbound.
+  rm -f "$RUN_DIR/result.yaml"
   exit 1
 else
   bash "$RUNNER" profile-init --roles-file "$RUN_DIR/resolved-config.json" --host "$HOST" \

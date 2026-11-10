@@ -162,7 +162,7 @@ codex:
   command_path: ""         # "" = auto-resolve & validate (exec --json), prefer Homebrew,
                            # skip NVM-shadowed old CLI; set absolute path to force
   reviewer:
-    model: "gpt-5.5"
+    model: "gpt-6.1-terra"
     effort: "high"         # via -c 'model_reasoning_effort="..."'
   implementer:
     model: "gpt-5.5"
@@ -324,6 +324,9 @@ get the results in their brief and a broken build is never reviewed blind. A run
 only when the last review read the current tree **and** the checks passed on that same tree; this
 applies on every path, including the default (no profile) one.
 
+Trust: a project `.devflow.yaml` `checks.commands`, and any discovered command, run that
+repository's own code on your machine, so run devflow only on repositories you trust.
+
 The `checks.commands` key (in `~/.devflow/config.yaml` or a project `.devflow.yaml`):
 
 ```yaml
@@ -338,7 +341,8 @@ An empty list triggers discovery. Every source that matches is used, in this ord
 3. `package.json` scripts `lint`, `typecheck`, `build`, `test` → `<pnpm|yarn|npm> run <script>`
    (package manager chosen by lockfile; npm's default `no test specified` placeholder is skipped)
 4. `Gemfile` + `spec/` → `bundle exec rspec`; `Gemfile` + `.rubocop.yml` → `bundle exec rubocop`
-5. `pytest.ini`, or `[tool.pytest` in `pyproject.toml` → `python3 -m pytest`
+5. `pytest.ini`, or `[tool.pytest` in `pyproject.toml` → `uv run --frozen pytest` if `uv.lock`
+   exists, else `poetry run pytest` if `poetry.lock` exists, else `python3 -m pytest`
 
 `$RUN_DIR/checks.txt` records `source=discovered` plus every command it ran. A project with no
 checks sets `checks.commands: ["true"]`: an explicit, visible opt-out. A project `.devflow.yaml`
@@ -385,7 +389,7 @@ implement round that spent the whole budget means the final review never dispatc
 
 | Role | claude backend | codex backend | Purpose |
 |------|---------------|---------------|----------|
-| Reviewer | opus / max | gpt-5.5 / high | Thorough plan and code reviews |
+| Reviewer | opus / max | gpt-6.1-terra / high | Thorough plan and code reviews |
 | Implementer | sonnet / high | gpt-5.5 / high | Fast, capable code generation |
 | Orchestrator | (host model) | (host model) | The agent running devflow (e.g., opus-4.6) |
 
